@@ -1,0 +1,20 @@
+{
+  "name": "golyglot-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "predev": "pnpm build:wasm",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build": "astro build",
+    "prebuild": "pnpm build:wasm",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.41.7",
+    "astro": "^7.2.2",
+    "monaco-editor": "^0.56.0",
+    "sharp": "^0.35.3"
+  }
+}

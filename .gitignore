@@ -1,2 +1,7 @@
 .cache/
 testdata/polyglot/*.full.json
+docs/node_modules/
+docs/dist/
+docs/.astro/
+docs/public/golyglot.wasm
+docs/public/wasm_exec.js

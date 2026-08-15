@@ -1,0 +1,22 @@
+---
+title: golyglot
+description: Pure-Go SQL parsing, formatting, and dialect intelligence.
+---
+
+`golyglot` is a native Go rewrite of the original [Polyglot](https://github.com/tobilg/polyglot) SQL library. It has no cgo, WASM, FFI, or production dependencies.
+
+The core is designed for Go applications and language tooling: it keeps source spans, recovers from incomplete SQL, returns structured diagnostics, and exposes a typed AST.
+
+## Try it
+
+Open the [Monaco demo](/demo/) to run the Go parser and formatter in your browser through WebAssembly.
+
+## What is included
+
+- Pairwise transpilation across 30+ named dialects
+- Typed AST parsing and SQL generation
+- Pretty-printing and canonical formatting
+- Fluent query builders
+- Syntax, semantic, and schema-aware validation
+- Column lineage and OpenLineage payloads
+- Query analysis facts and AST visitor utilities

@@ -1,0 +1,244 @@
+<section class="playground" data-golyglot-playground aria-label="golyglot SQL playground">
+	<div class="toolbar">
+		<label>
+			<span>Read dialect</span>
+			<select data-read-dialect>
+				<option value="generic">Generic</option>
+				<option value="postgresql" selected>PostgreSQL</option>
+				<option value="mysql">MySQL</option>
+				<option value="bigquery">BigQuery</option>
+				<option value="snowflake">Snowflake</option>
+				<option value="duckdb">DuckDB</option>
+			</select>
+		</label>
+		<label>
+			<span>Write dialect</span>
+			<select data-write-dialect>
+				<option value="generic">Generic</option>
+				<option value="postgresql">PostgreSQL</option>
+				<option value="mysql" selected>MySQL</option>
+				<option value="bigquery">BigQuery</option>
+				<option value="snowflake">Snowflake</option>
+				<option value="duckdb">DuckDB</option>
+			</select>
+		</label>
+		<div class="actions">
+			<button type="button" data-action="format">Format</button>
+			<button type="button" data-action="transpile">Transpile</button>
+		</div>
+	</div>
+	<div class="editor-shell">
+		<div class="editor" data-editor></div>
+	</div>
+	<div class="result-head">
+		<strong data-status>Starting Go/WASM…</strong>
+		<span data-engine>Monaco</span>
+	</div>
+	<pre class="output" data-output aria-live="polite"></pre>
+	<p class="hint">Try deleting a closing parenthesis or leave the <code>WHERE</code> clause incomplete.</p>
+</section>
+
+<script>
+	// @ts-nocheck
+	import * as monaco from 'monaco-editor';
+	import EditorWorker from '../../node_modules/monaco-editor/esm/vs/editor/editor.worker.js?worker';
+
+	globalThis.MonacoEnvironment = {
+		getWorker() {
+			return new EditorWorker();
+		},
+	};
+
+	const root = document.querySelector('[data-golyglot-playground]');
+	const editorElement = root.querySelector('[data-editor]');
+	const statusElement = root.querySelector('[data-status]');
+	const outputElement = root.querySelector('[data-output]');
+	const readDialect = root.querySelector('[data-read-dialect]');
+	const writeDialect = root.querySelector('[data-write-dialect]');
+	const sample = `SELECT
+  customer_id,
+  SUM(amount) AS total
+FROM orders
+WHERE status = 'paid'
+GROUP BY customer_id`;
+
+	const editor = monaco.editor.create(editorElement, {
+		value: sample,
+		language: 'sql',
+		theme: 'vs-dark',
+		automaticLayout: true,
+		fontSize: 14,
+		minimap: { enabled: false },
+		padding: { top: 16, bottom: 16 },
+		scrollBeyondLastLine: false,
+	});
+	const model = editor.getModel();
+	let api;
+	let refreshTimer;
+
+	function bytePosition(text, target) {
+		const encoder = new TextEncoder();
+		let bytes = 0;
+		let line = 1;
+		let column = 1;
+		for (const character of text) {
+			if (bytes >= target) break;
+			bytes += encoder.encode(character).length;
+			if (character === '\n') {
+				line += 1;
+				column = 1;
+			} else {
+				column += character.length;
+			}
+		}
+		return { line, column };
+	}
+
+	function setMarkers(text, diagnostics) {
+		const markers = diagnostics.map((diagnostic) => {
+			const start = bytePosition(text, diagnostic.start);
+			const end = bytePosition(text, diagnostic.end);
+			const severity = diagnostic.severity === 'warning'
+				? monaco.MarkerSeverity.Warning
+				: diagnostic.severity === 'information'
+					? monaco.MarkerSeverity.Info
+					: monaco.MarkerSeverity.Error;
+			return {
+				severity,
+				message: `${diagnostic.code}: ${diagnostic.message}`,
+				startLineNumber: start.line,
+				startColumn: start.column,
+				endLineNumber: end.line,
+				endColumn: Math.max(end.column, start.column + 1),
+			};
+		});
+		monaco.editor.setModelMarkers(model, 'golyglot', markers);
+	}
+
+	function showResponse(response, text) {
+		if (response.error) {
+			statusElement.textContent = `Error · ${response.error}`;
+			outputElement.textContent = '';
+			return;
+		}
+		setMarkers(text, response.diagnostics || []);
+		const count = (response.diagnostics || []).length;
+		statusElement.textContent = response.ok
+			? `Ready · ${response.statements} statement${response.statements === 1 ? '' : 's'}`
+			: `${count} diagnostic${count === 1 ? '' : 's'}`;
+		outputElement.textContent = response.formatted || 'No generated SQL yet.';
+	}
+
+	function call(method, ...args) {
+		return JSON.parse(api[method](...args));
+	}
+
+	function parseCurrent() {
+		if (!api) return;
+		const text = editor.getValue();
+		showResponse(call('parse', text, readDialect.value), text);
+	}
+
+	async function startWasm() {
+		const go = new globalThis.Go();
+		const response = await fetch('/golyglot.wasm');
+		let module;
+		if (WebAssembly.instantiateStreaming) {
+			try {
+				module = await WebAssembly.instantiateStreaming(response, go.importObject);
+			} catch {
+				const fallbackResponse = await fetch('/golyglot.wasm');
+				module = await WebAssembly.instantiate(await fallbackResponse.arrayBuffer(), go.importObject);
+			}
+		} else {
+			module = await WebAssembly.instantiate(await response.arrayBuffer(), go.importObject);
+		}
+		void go.run(module.instance);
+		for (let attempt = 0; attempt < 100; attempt += 1) {
+			if (globalThis.golyglot) return globalThis.golyglot;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		throw new Error('golyglot WASM API did not start');
+	}
+
+	root.querySelector('[data-action="format"]').addEventListener('click', () => {
+		if (!api) return;
+		const text = editor.getValue();
+		showResponse(call('format', text, readDialect.value), text);
+	});
+	root.querySelector('[data-action="transpile"]').addEventListener('click', () => {
+		if (!api) return;
+		const text = editor.getValue();
+		showResponse(call('transpile', text, readDialect.value, writeDialect.value), text);
+	});
+	readDialect.addEventListener('change', parseCurrent);
+	editor.onDidChangeModelContent(() => {
+		clearTimeout(refreshTimer);
+		refreshTimer = setTimeout(parseCurrent, 180);
+	});
+
+	startWasm()
+		.then((loadedAPI) => {
+			api = loadedAPI;
+			statusElement.textContent = 'Ready · Go/WASM';
+			parseCurrent();
+		})
+		.catch((error) => {
+			statusElement.textContent = `WASM unavailable · ${error.message}`;
+			outputElement.textContent = 'Run the docs build first so public/golyglot.wasm is present.';
+		});
+</script>
+
+<style>
+	.playground {
+		margin-top: 2rem;
+		border: 1px solid #2b3240;
+		border-radius: 14px;
+		background: #171b24;
+		overflow: hidden;
+	}
+	.toolbar {
+		display: flex;
+		align-items: end;
+		gap: 1rem;
+		flex-wrap: wrap;
+		padding: 1rem;
+		border-bottom: 1px solid #2b3240;
+	}
+	.toolbar label { display: grid; gap: .35rem; color: #aeb7c6; font-size: .78rem; }
+	select, button {
+		border: 1px solid #3a4557;
+		border-radius: 6px;
+		background: #202735;
+		color: #e8ecf3;
+		padding: .5rem .65rem;
+		font: inherit;
+	}
+	button { cursor: pointer; }
+	button:hover { border-color: #72d6b2; }
+	.actions { display: flex; gap: .5rem; margin-left: auto; }
+	.editor-shell { min-height: 360px; }
+	.editor { height: 360px; }
+	.result-head {
+		display: flex;
+		justify-content: space-between;
+		gap: 1rem;
+		padding: .8rem 1rem;
+		border-top: 1px solid #2b3240;
+		color: #72d6b2;
+	}
+	.result-head span { color: #7d8798; font-size: .8rem; }
+	.output {
+		min-height: 5rem;
+		margin: 0;
+		padding: 1rem;
+		background: #0e1117;
+		color: #d7dfec;
+		white-space: pre-wrap;
+	}
+	.hint { margin: 0; padding: .85rem 1rem 1rem; color: #7d8798; font-size: .85rem; }
+	@media (max-width: 640px) {
+		.actions { width: 100%; margin-left: 0; }
+		.actions button { flex: 1; }
+	}
+</style>

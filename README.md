@@ -30,4 +30,5 @@ Supported features:
 - AST walking, transformation, search, and column-reference utilities
 
 Alpha release. Run `make release-check`; use `make fixtures` for optional
-upstream Polyglot compatibility fixtures.
+upstream Polyglot compatibility fixtures. The Astro/Starlight docs and
+Monaco/WASM demo live under `docs/`; use `make docs-build`.
