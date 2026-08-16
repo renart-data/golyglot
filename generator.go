@@ -2411,7 +2411,7 @@ func (g generator) expr(expression Expr, parentPrecedence int) (string, error) {
 		}
 		text = value + " " + expression.Operator + " " + right
 	case *FunctionCallExpr:
-		if g.pretty && functionNeedsPrettyLayout(expression) {
+		if g.pretty && functionNeedsPrettyLayout(expression) && !(expression.ArrayLiteral && g.dialect == DialectBigQuery) {
 			return g.prettyFunctionCall(expression, parentPrecedence)
 		}
 		text = generateFunctionName(expression.Name)

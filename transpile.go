@@ -88,6 +88,9 @@ func TranspileWithOptions(sql string, fromDialect, toDialect Dialect, options Tr
 		if toDialect == DialectDuckDB {
 			text = replaceAllFold(text, "TABLESAMPLE (", "TABLESAMPLE RESERVOIR (")
 		}
+		if toDialect == DialectAthena {
+			text = normalizeAthenaAlterTable(text)
+		}
 		if toDialect == DialectSpark {
 			text = normalizeSparkTableSamples(text)
 		}
@@ -106,6 +109,19 @@ func TranspileWithOptions(sql string, fromDialect, toDialect Dialect, options Tr
 		generated = append(generated, text)
 	}
 	return generated, nil
+}
+
+func normalizeAthenaAlterTable(text string) string {
+	upper := strings.ToUpper(text)
+	index := strings.Index(upper, " ADD COLUMN ")
+	if index < 0 {
+		return text
+	}
+	rest := strings.TrimSpace(text[index+len(" ADD COLUMN "):])
+	if rest == "" || strings.HasPrefix(rest, "(") {
+		return text
+	}
+	return text[:index] + " ADD COLUMNS (" + rest + ")"
 }
 
 func restoreSnowflakeIdentityFunctions(text string) string {
@@ -863,6 +879,19 @@ func normalizeGenericSourceNode(root Node, target Dialect) Node {
 				return &RawStmt{nodeBase: value.nodeBase, Keyword: "SELECT", Raw: "SELECT TOP 0 * INTO " + generateIdentifiers(value.Name) + " FROM " + source + " AS temp"}
 			}
 		case *TypedLiteralExpr:
+			if value.Value == nil && len(value.TypeName) == 1 && len(value.Parameters) >= 3 {
+				name := strings.ToUpper(value.TypeName[0].Text)
+				mapped := ""
+				switch name {
+				case "DATE":
+					mapped = map[Dialect]string{DialectDuckDB: "MAKE_DATE", DialectSnowflake: "DATE_FROM_PARTS"}[target]
+				case "DATETIME", "TIMESTAMP":
+					mapped = map[Dialect]string{DialectDuckDB: "MAKE_TIMESTAMP", DialectSnowflake: "TIMESTAMP_FROM_PARTS"}[target]
+				}
+				if mapped != "" {
+					return &FunctionCallExpr{Name: []Identifier{{Text: mapped}}, Args: value.Parameters}
+				}
+			}
 			if len(value.TypeName) == 1 && strings.EqualFold(value.TypeName[0].Text, "TIMESTAMP") && value.Value != nil {
 				var typeName string
 				switch target {
@@ -871,6 +900,15 @@ func normalizeGenericSourceNode(root Node, target Dialect) Node {
 				}
 				if typeName != "" {
 					return rawCast(value.Value.Raw, typeName)
+				}
+			}
+		case *LiteralExpr:
+			// BigQuery accepts both single- and double-quoted string
+			// literals. Once the source dialect is no longer BigQuery,
+			// retain their value but emit the portable SQL string form.
+			if value.KindValue == LiteralString && target != DialectBigQuery {
+				if normalized, ok := normalizeBigQueryString(value.Raw); ok {
+					value.Raw = normalized
 				}
 			}
 		case *CastExpr:
@@ -900,6 +938,15 @@ func normalizeGenericSourceNode(root Node, target Dialect) Node {
 		case *BinaryExpr:
 			if rewritten := rewriteGenericSourceBinary(value, target); rewritten != nil {
 				return rewritten
+			}
+		case *IsExpr:
+			if target == DialectSnowflake && strings.EqualFold(value.Operator, "IS") {
+				if literal, ok := value.Right.(*LiteralExpr); ok && literal.KindValue == LiteralBoolean {
+					if strings.EqualFold(literal.Raw, "TRUE") {
+						return value.Value
+					}
+					return &UnaryExpr{Operator: "NOT", Expr: value.Value}
+				}
 			}
 		case *FunctionCallExpr:
 			if target == DialectPostgreSQL || target == DialectSnowflake {
@@ -1364,6 +1411,28 @@ func rewriteGenericSourceFunction(function *FunctionCallExpr, target Dialect) Ex
 		return rewritten
 	}
 	switch name {
+	case "DATE":
+		if len(function.Args) == 3 {
+			switch target {
+			case DialectDuckDB:
+				setFunctionName(function, "MAKE_DATE")
+				return function
+			case DialectSnowflake:
+				setFunctionName(function, "DATE_FROM_PARTS")
+				return function
+			}
+		}
+	case "DATETIME":
+		if len(function.Args) >= 3 {
+			switch target {
+			case DialectDuckDB:
+				setFunctionName(function, "MAKE_TIMESTAMP")
+				return function
+			case DialectSnowflake:
+				setFunctionName(function, "TIMESTAMP_FROM_PARTS")
+				return function
+			}
+		}
 	case "EDIT_DISTANCE":
 		mapped := map[Dialect]string{
 			DialectDuckDB: "LEVENSHTEIN", DialectPostgreSQL: "LEVENSHTEIN_LESS_EQUAL", DialectSnowflake: "EDITDISTANCE",
@@ -1472,6 +1541,16 @@ func rewriteGenericSourceFunction(function *FunctionCallExpr, target Dialect) Ex
 				args = append(args, text)
 			}
 			return &RawExpr{Raw: "CASE WHEN " + strings.Join(conditions, " OR ") + " THEN NULL ELSE CONCAT_WS(" + strings.Join(args, ", ") + ") END"}
+		}
+	case "SPACE":
+		if target == DialectBigQuery && len(function.Args) == 1 {
+			return &FunctionCallExpr{
+				Name: []Identifier{{Text: "REPEAT"}},
+				Args: []Expr{
+					&LiteralExpr{KindValue: LiteralString, Raw: "' '"},
+					function.Args[0],
+				},
+			}
 		}
 	case "IF":
 		if len(function.Args) == 3 {
@@ -4528,6 +4607,7 @@ func transformSelect(stmt *SelectStmt, target Dialect) {
 	for i := range stmt.Windows {
 		transformWindow(&stmt.Windows[i].Spec, target)
 	}
+	inlineNamedWindows(stmt, target)
 	stmt.SortBy = rewriteOrderItems(stmt.SortBy, target)
 	stmt.OrderBy = rewriteOrderItems(stmt.OrderBy, target)
 	stmt.Limit = transformExpr(stmt.Limit, target)
@@ -4541,6 +4621,58 @@ func transformSelect(stmt *SelectStmt, target Dialect) {
 	if stmt.SetRight != nil {
 		transformSelect(stmt.SetRight, target)
 	}
+}
+
+// inlineNamedWindows lowers named WINDOW references for targets whose
+// SQLGlot generators emit the window specification at each use site. Keep the
+// declarations for dialects that support the named-window form directly.
+func inlineNamedWindows(stmt *SelectStmt, target Dialect) {
+	switch target {
+	case DialectPresto, DialectRedshift, DialectSnowflake:
+	default:
+		return
+	}
+	if stmt == nil || len(stmt.Windows) == 0 {
+		return
+	}
+	windows := make(map[string]WindowSpec, len(stmt.Windows))
+	for _, window := range stmt.Windows {
+		windows[strings.ToUpper(window.Name.Text)] = window.Spec
+	}
+	Walk(stmt, func(current Node) VisitAction {
+		switch value := current.(type) {
+		case *FunctionCallExpr:
+			inlineWindowReference(&value.Over, windows)
+		case *WindowedExpr:
+			inlineWindowValue(&value.Over, windows)
+		}
+		return VisitChildren
+	})
+	stmt.Windows = nil
+}
+
+func inlineWindowReference(reference **WindowSpec, windows map[string]WindowSpec) {
+	if reference == nil || *reference == nil || (*reference).Name == nil {
+		return
+	}
+	spec, ok := windows[strings.ToUpper((*reference).Name.Text)]
+	if !ok {
+		return
+	}
+	spec.Name = nil
+	*reference = &spec
+}
+
+func inlineWindowValue(reference *WindowSpec, windows map[string]WindowSpec) {
+	if reference == nil || reference.Name == nil {
+		return
+	}
+	spec, ok := windows[strings.ToUpper(reference.Name.Text)]
+	if !ok {
+		return
+	}
+	spec.Name = nil
+	*reference = spec
 }
 
 func normalizeDuckDBCommaUnnest(stmt *SelectStmt) {

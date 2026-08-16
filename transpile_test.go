@@ -16,6 +16,10 @@ func TestTranspileFunctionRewrites(t *testing.T) {
 		{name: "group concat", sql: "SELECT GROUP_CONCAT(name)", from: DialectMySQL, to: DialectPostgreSQL, want: "SELECT STRING_AGG(name, ',')"},
 		{name: "array agg", sql: "SELECT ARRAY_AGG(name)", from: DialectGeneric, to: DialectMySQL, want: "SELECT GROUP_CONCAT(name)"},
 		{name: "substring", sql: "SELECT SUBSTR(name, 1, 5)", from: DialectGeneric, to: DialectPostgreSQL, want: "SELECT SUBSTRING(name FROM 1 FOR 5)"},
+		{name: "bigquery strings become portable literals", sql: `SELECT "A"`, from: DialectBigQuery, to: DialectDuckDB, want: "SELECT 'A'"},
+		{name: "bigquery date constructor", sql: "SELECT DATE(2024, 1, 15)", from: DialectBigQuery, to: DialectDuckDB, want: "SELECT MAKE_DATE(2024, 1, 15)"},
+		{name: "athena add columns", sql: "ALTER TABLE `foo`.`bar` ADD COLUMN `end_ts` BIGINT", from: DialectAthena, to: DialectAthena, want: "ALTER TABLE `foo`.`bar` ADD COLUMNS (`end_ts` BIGINT)"},
+		{name: "inline named window", sql: "SELECT purchases, LAST_VALUE(item) OVER item_window AS most_popular FROM Produce WINDOW item_window AS (PARTITION BY purchases ORDER BY purchases ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING)", from: DialectBigQuery, to: DialectPresto, want: "SELECT purchases, LAST_VALUE(item) OVER (PARTITION BY purchases ORDER BY purchases NULLS FIRST ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING) AS most_popular FROM Produce"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
