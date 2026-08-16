@@ -1,0 +1,216 @@
+{
+  "roundtrips": [
+    {
+      "sql": "SELECT * FROM x CROSS JOIN y, z LATERAL VIEW EXPLODE(y)",
+      "expected": "SELECT * FROM x CROSS JOIN y, z LATERAL VIEW EXPLODE(y)",
+      "read": null,
+      "write": null,
+      "line": 281
+    },
+    {
+      "sql": "SELECT ROW() OVER(PARTITION  BY x) FROM x GROUP  BY y",
+      "expected": "SELECT ROW() OVER (PARTITION BY x) FROM x GROUP BY y",
+      "read": null,
+      "write": null,
+      "line": 418
+    },
+    {
+      "sql": "SELECT   * FROM x GROUP\n                BY y",
+      "expected": "SELECT * FROM x GROUP BY y",
+      "read": null,
+      "write": null,
+      "line": 423
+    },
+    {
+      "sql": "SELECT @x, @@x, @1",
+      "expected": "SELECT @x, @@x, @1",
+      "read": null,
+      "write": null,
+      "line": 436
+    },
+    {
+      "sql": "SELECT @JOIN, @'foo'",
+      "expected": "SELECT @JOIN, @'foo'",
+      "read": null,
+      "write": null,
+      "line": 440
+    },
+    {
+      "sql": "TIMESTAMP '2022-01-01'",
+      "expected": "CAST('2022-01-01' AS TIMESTAMP)",
+      "read": null,
+      "write": null,
+      "line": 597
+    },
+    {
+      "sql": "TIMESTAMP(1) '2022-01-01'",
+      "expected": "CAST('2022-01-01' AS TIMESTAMP(1))",
+      "read": null,
+      "write": null,
+      "line": 600
+    },
+    {
+      "sql": "TIMESTAMP WITH TIME ZONE '2022-01-01'",
+      "expected": "CAST('2022-01-01' AS TIMESTAMPTZ)",
+      "read": null,
+      "write": null,
+      "line": 603
+    },
+    {
+      "sql": "TIMESTAMP WITH LOCAL TIME ZONE '2022-01-01'",
+      "expected": "CAST('2022-01-01' AS TIMESTAMPLTZ)",
+      "read": null,
+      "write": null,
+      "line": 607
+    },
+    {
+      "sql": "TIMESTAMP WITHOUT TIME ZONE '2022-01-01'",
+      "expected": "CAST('2022-01-01' AS TIMESTAMP)",
+      "read": null,
+      "write": null,
+      "line": 611
+    },
+    {
+      "sql": "TIMESTAMP(1) WITH TIME ZONE '2022-01-01'",
+      "expected": "CAST('2022-01-01' AS TIMESTAMPTZ(1))",
+      "read": null,
+      "write": null,
+      "line": 615
+    },
+    {
+      "sql": "TIMESTAMP(1) WITH LOCAL TIME ZONE '2022-01-01'",
+      "expected": "CAST('2022-01-01' AS TIMESTAMPLTZ(1))",
+      "read": null,
+      "write": null,
+      "line": 619
+    },
+    {
+      "sql": "TIMESTAMP(1) WITHOUT TIME ZONE '2022-01-01'",
+      "expected": "CAST('2022-01-01' AS TIMESTAMP(1))",
+      "read": null,
+      "write": null,
+      "line": 623
+    },
+    {
+      "sql": "TIMESTAMP(1) WITH TIME ZONE",
+      "expected": "TIMESTAMPTZ(1)",
+      "read": null,
+      "write": null,
+      "line": 627
+    },
+    {
+      "sql": "TIMESTAMP(1) WITH LOCAL TIME ZONE",
+      "expected": "TIMESTAMPLTZ(1)",
+      "read": null,
+      "write": null,
+      "line": 628
+    },
+    {
+      "sql": "TIMESTAMP(1) WITHOUT TIME ZONE",
+      "expected": "TIMESTAMP(1)",
+      "read": null,
+      "write": null,
+      "line": 629
+    },
+    {
+      "sql": "JSON '{\"x\":\"y\"}'",
+      "expected": "PARSE_JSON('{\"x\":\"y\"}')",
+      "read": null,
+      "write": null,
+      "line": 630
+    },
+    {
+      "sql": "SELECT col FROM x",
+      "expected": "SELECT col FROM x",
+      "read": null,
+      "write": null,
+      "line": 674
+    },
+    {
+      "sql": "create materialized table x",
+      "expected": "CREATE MATERIALIZED TABLE x",
+      "read": null,
+      "write": null,
+      "line": 911
+    },
+    {
+      "sql": "SELECT a, b ?? 'No Data' FROM z",
+      "expected": "SELECT a, COALESCE(b, 'No Data') FROM z",
+      "read": null,
+      "write": null,
+      "line": 920
+    },
+    {
+      "sql": "SELECT a, b ?? c ?? 'No Data' FROM z",
+      "expected": "SELECT a, COALESCE(COALESCE(b, c), 'No Data') FROM z",
+      "read": null,
+      "write": null,
+      "line": 924
+    },
+    {
+      "sql": "SELECT 1 WINDOW a AS (PARTITION BY x), b AS (ORDER BY y)",
+      "expected": "SELECT 1 WINDOW a AS (PARTITION BY x), b AS (ORDER BY y)",
+      "read": null,
+      "write": null,
+      "line": 1188
+    },
+    {
+      "sql": "SELECT 1 AS WINDOW",
+      "expected": "SELECT 1 AS WINDOW",
+      "read": null,
+      "write": null,
+      "line": 1194
+    },
+    {
+      "sql": "SELECT col window FROM t",
+      "expected": "SELECT col AS window FROM t",
+      "read": null,
+      "write": null,
+      "line": 1197
+    },
+    {
+      "sql": "SELECT col FROM x",
+      "expected": "SELECT\n  col\nFROM x",
+      "read": null,
+      "write": null,
+      "line": 676
+    }
+  ],
+  "errors": [
+    {
+      "sql": "IF(a > 0, a, b, c)",
+      "read": null,
+      "line": 389
+    },
+    {
+      "sql": "IF(a > 0)",
+      "read": null,
+      "line": 392
+    },
+    {
+      "sql": "SELECT CASE FROM x",
+      "read": null,
+      "line": 395
+    },
+    {
+      "sql": "WITH cte AS (SELECT * FROM x)",
+      "read": null,
+      "line": 398
+    },
+    {
+      "sql": "SELECT foo( FROM bar",
+      "read": null,
+      "line": 401
+    },
+    {
+      "sql": "SELECT A[:",
+      "read": null,
+      "line": 413
+    },
+    {
+      "sql": "SELECT FROM x ORDER BY",
+      "read": null,
+      "line": 433
+    }
+  ]
+}

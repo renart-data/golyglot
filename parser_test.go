@@ -89,6 +89,16 @@ func TestTolerantIncompleteOperators(t *testing.T) {
 	}
 }
 
+func TestFunctionArgumentsCanUseValuesQualifiedName(t *testing.T) {
+	result, err := ParseStrict("SELECT FOO(values.c)", DialectGeneric)
+	if err != nil {
+		t.Fatalf("parse error: %v\n%#v", err, result.Diagnostics)
+	}
+	if generated, err := Generate(result.Statements[0].Node); err != nil || generated != "SELECT FOO(values.c)" {
+		t.Fatalf("generated SQL = %q, error = %v", generated, err)
+	}
+}
+
 func TestMalformedProjectionDoesNotStopFollowingItems(t *testing.T) {
 	result := ParseTolerant("SELECT a,, b FROM users", DialectGeneric)
 	requireDiagnosticCode(t, result.Diagnostics, "PARSE_EXPECTED_EXPRESSION")

@@ -86,14 +86,21 @@ type Statement struct {
 
 type SelectStmt struct {
 	nodeBase
+	RawQuery         string
 	With             []CTE
 	Distinct         bool
 	DistinctOn       []Expr
+	SelectModifier   string
 	Top              Expr
+	TopParenthesized bool
 	Projections      []SelectItem
+	Into             []Identifier
+	IntoTemporary    bool
+	IntoUnlogged     bool
 	From             []TableExpr
 	Where            Expr
 	GroupBy          []Expr
+	GroupByDistinct  bool
 	Having           Expr
 	Qualify          Expr
 	ConnectBy        Expr
@@ -103,8 +110,15 @@ type SelectStmt struct {
 	Limit            Expr
 	Offset           Expr
 	Fetch            *FetchClause
+	// ValuesRows represents a VALUES query before dialect-specific lowering.
+	// Keeping it on SelectStmt lets VALUES participate in CTEs and set
+	// operations without introducing a second query root type.
+	ValuesRows       [][]Expr
+	ValuesAlias      *Identifier
+	ValuesColumns    []Identifier
 	SetOperator      string
 	SetAll           bool
+	SetModifier      string
 	SetLeft          *SelectStmt
 	SetRight         *SelectStmt
 	Parenthesized    bool
@@ -112,6 +126,10 @@ type SelectStmt struct {
 	SetRightParen    bool
 	ParenthesisDepth int
 	TailOutsideParen bool
+	// Tail preserves dialect-specific query clauses that the common grammar
+	// does not model yet. It keeps parsing lossless without pretending the
+	// clause has generic semantics.
+	Tail string
 }
 
 func (*SelectStmt) Kind() NodeKind { return NodeSelectStatement }
@@ -197,25 +215,30 @@ type UnknownStmt struct {
 func (*UnknownStmt) Kind() NodeKind { return NodeUnknownStatement }
 
 type CTE struct {
-	Name      Identifier
-	Columns   []Identifier
-	Query     *SelectStmt
-	Recursive bool
-	Span      Span
+	Name         Identifier
+	Columns      []Identifier
+	Modifier     string
+	Query        *SelectStmt
+	Recursive    bool
+	Materialized string
+	Span         Span
 }
 
 type SelectItem struct {
-	Expr    Expr
-	Alias   *Identifier
-	Except  []Expr
-	Replace []SelectItem
-	Span    Span
+	Expr         Expr
+	Alias        *Identifier
+	AliasColumns []Identifier
+	Except       []Expr
+	Replace      []SelectItem
+	Rename       bool
+	Span         Span
 }
 
 type OrderItem struct {
 	Expr       Expr
 	Ascending  bool
 	Descending bool
+	NullsFirst bool
 	NullsLast  bool
 	Span       Span
 }
@@ -280,6 +303,8 @@ type TableName struct {
 	Alias   *Identifier
 	Columns []Identifier
 	Sample  *TableSample
+	Hint    string
+	Tail    string
 }
 
 func (*TableName) Kind() NodeKind { return NodeTable }
@@ -324,6 +349,7 @@ type TableFunctionFrom struct {
 	Alias          *Identifier
 	Columns        []Identifier
 	WithOrdinality bool
+	WithOffset     bool
 }
 
 type TableSample struct {
@@ -339,7 +365,10 @@ func (*TableFunctionFrom) fromItemNode()  {}
 type Identifier struct {
 	Text   string
 	Quoted bool
-	Span   Span
+	// Quote retains the source delimiter for lossless dialect identity
+	// generation. It is one of '"', '`', or '[' for bracketed identifiers.
+	Quote byte
+	Span  Span
 }
 
 type IdentifierExpr struct {
@@ -407,11 +436,12 @@ func (*InExpr) expressionNode() {}
 
 type BetweenExpr struct {
 	nodeBase
-	Value     Expr
-	Not       bool
-	Low       Expr
-	High      Expr
-	Symmetric bool
+	Value      Expr
+	Not        bool
+	Low        Expr
+	High       Expr
+	Symmetric  bool
+	Asymmetric bool
 }
 
 func (*BetweenExpr) Kind() NodeKind  { return NodeBetween }
@@ -433,10 +463,14 @@ type FunctionCallExpr struct {
 	RawArgs      string
 	Distinct     bool
 	Args         []Expr
+	Having       Expr
+	ArgumentTail string
 	Star         bool
+	ArrayLiteral bool
 	OrderBy      []OrderItem
 	IgnoreNulls  bool
 	RespectNulls bool
+	NullsInside  bool
 	WithinGroup  []OrderItem
 	Filter       Expr
 	Over         *WindowSpec
@@ -515,10 +549,11 @@ func (*IntervalExpr) expressionNode() {}
 
 type CastExpr struct {
 	nodeBase
-	Keyword    string
-	Value      Expr
-	Type       Expr
-	TypeSuffix []Identifier
+	Keyword                string
+	Value                  Expr
+	Type                   Expr
+	TypeSuffix             []Identifier
+	preserveTypeParameters bool
 }
 
 func (*CastExpr) Kind() NodeKind  { return NodeCast }
@@ -544,8 +579,9 @@ func (*ExistsExpr) expressionNode() {}
 
 type QuantifiedExpr struct {
 	nodeBase
-	Keyword string
-	Query   *SelectStmt
+	Keyword          string
+	Query            *SelectStmt
+	SpaceBeforeParen bool
 }
 
 func (*QuantifiedExpr) Kind() NodeKind  { return NodeQuantified }
@@ -574,7 +610,8 @@ func (*SetExpr) expressionNode() {}
 
 type SubqueryExpr struct {
 	nodeBase
-	Query *SelectStmt
+	Query         *SelectStmt
+	Parenthesized bool
 }
 
 func (*SubqueryExpr) Kind() NodeKind  { return NodeSubqueryExpr }
@@ -619,6 +656,7 @@ type IndexExpr struct {
 	Target  Expr
 	Low     Expr
 	High    Expr
+	Step    Expr
 	Slice   bool
 	Indices []Expr
 }

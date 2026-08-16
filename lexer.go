@@ -18,12 +18,16 @@ var sqlKeywords = map[string]struct{}{
 	"LIKE": {}, "LIMIT": {}, "NOT": {}, "NULL": {}, "NULLS": {}, "OFFSET": {},
 	"ON": {}, "OR": {}, "ORDER": {}, "OUTER": {}, "OVER": {}, "PARTITION": {}, "PIVOT": {}, "UNPIVOT": {}, "NATURAL": {}, "SEMI": {}, "ANTI": {},
 	"PRECEDING": {}, "QUALIFY": {}, "RANGE": {}, "RIGHT": {}, "RETURNING": {},
-	"ROWS": {}, "ROW": {}, "SELECT": {}, "TABLE": {}, "TABLESAMPLE": {}, "REPLACE": {}, "THEN": {}, "TRUE": {},
+	"ROWS": {}, "ROW": {}, "SELECT": {}, "TABLE": {}, "TABLESAMPLE": {}, "REPLACE": {}, "THEN": {}, "TOP": {}, "TRUE": {},
 	"UNION": {}, "UNNEST": {}, "UPDATE": {}, "USING": {}, "VALUES": {},
 	"WHEN": {}, "WHERE": {}, "WINDOW": {}, "WITH": {}, "ALTER": {}, "DROP": {},
+	"EXCLUDE": {}, "UNDROP": {}, "MD5_HEX": {},
 	"MERGE": {}, "TRUNCATE": {}, "GRANT": {}, "REVOKE": {}, "EXPLAIN": {},
 	"SHOW": {}, "DESCRIBE": {}, "USE": {}, "CACHE": {}, "UNCACHE": {}, "LOAD": {}, "COMMENT": {}, "PRAGMA": {}, "KILL": {}, "CONNECT": {}, "STRAIGHT_JOIN": {},
-	"BEGIN": {}, "START": {}, "COMMIT": {}, "ROLLBACK": {}, "VACUUM": {}, "ANALYZE": {}, "EXPORT": {}, "IMPORT": {}, "CALL": {}, "EXEC": {},
+	"CLUSTER": {}, "SAMPLE": {}, "SETTINGS": {}, "MATCH_RECOGNIZE": {}, "INDEXED": {}, "REFRESH": {}, "DEALLOCATE": {}, "RESET": {}, "EXECUTE": {},
+	"COPY": {}, "UNLOAD": {}, "PRINT": {},
+	"BEGIN": {}, "START": {}, "COMMIT": {}, "ROLLBACK": {}, "VACUUM": {}, "ANALYZE": {}, "EXPORT": {}, "IMPORT": {}, "CALL": {}, "EXEC": {}, "DECLARE": {}, "LOOP": {}, "REPEAT": {}, "WHILE": {}, "MODEL": {}, "CORRESPONDING": {}, "STRICT": {},
+	"ATTACH": {}, "DETACH": {}, "INSTALL": {}, "CHECKPOINT": {}, "SUMMARIZE": {}, "SEQUENCE": {}, "FORCE": {},
 }
 
 type lexer struct {
@@ -47,27 +51,45 @@ func (l *lexer) run() {
 		c := l.text[l.pos]
 
 		switch {
-		case isSpace(c):
+		case isSpaceAt(l.text, l.pos):
 			l.consumeWhitespace()
+		case l.options.Dialect == DialectSnowflake && strings.HasPrefix(l.text[l.pos:], "//") && !snowflakeURISlash(l.text, l.pos):
+			l.scanLineComment(2)
 		case strings.HasPrefix(l.text[l.pos:], "--"):
 			l.scanLineComment(2)
-		case c == '#' && (l.pos == 0 || isSpace(l.text[l.pos-1])):
+		case c == '#' && l.options.Dialect == DialectTSQL:
+			l.scanIdentifier()
+		case c == '#' && l.options.Dialect == DialectDuckDB && l.pos+1 < len(l.text) && isASCIIDigit(l.text[l.pos+1]):
+			l.scanDuckDBPositionalColumn()
+		case c == '#' && l.options.Dialect != DialectSnowflake && (l.pos == 0 || isSpace(l.text[l.pos-1])):
 			l.scanLineComment(1)
 		case strings.HasPrefix(l.text[l.pos:], "/*"):
 			l.scanBlockComment()
+		case l.options.Dialect == DialectBigQuery && (c == 'b' || c == 'B' || c == 'r' || c == 'R') && l.pos+1 < len(l.text) && (l.text[l.pos+1] == '\'' || l.text[l.pos+1] == '"'):
+			l.scanBigQueryPrefixedString()
+		case l.options.Dialect == DialectBigQuery && (c == '\'' || c == '"'):
+			l.scanBigQueryString(0)
 		case c == '\'' || c == '"' || c == '`' || (c == '[' && l.options.Dialect == DialectTSQL):
 			l.scanQuoted(c)
 		case c == '$' && l.pos+1 < len(l.text) && isASCIIDigit(l.text[l.pos+1]):
 			l.scanParameter()
+		case strings.HasPrefix(l.text[l.pos:], "${"):
+			l.scanTemplateParameter()
 		case c == '$' && l.scanDollarQuoted():
 		case c == '@':
+			if strings.HasPrefix(l.text[l.pos:], "@>") {
+				l.scanOperator()
+				break
+			}
 			l.scanAtParameter()
 		case strings.HasPrefix(l.text[l.pos:], "??"):
 			l.scanOperator()
 		case c == '?':
 			l.pos++
 			l.emit(TokenParameter, start, l.pos)
-		case c == ':' && l.pos+1 < len(l.text) && isIdentifierStartAt(l.text, l.pos+1):
+		case c == ':' && l.options.Dialect != DialectDuckDB && l.pos+1 < len(l.text) && isIdentifierStartAt(l.text, l.pos+1):
+			l.scanColonParameter()
+		case c == ':' && l.options.Dialect == DialectSnowflake && l.pos+1 < len(l.text) && isASCIIDigit(l.text[l.pos+1]):
 			l.scanColonParameter()
 		case isASCIIDigit(c) || (c == '.' && l.pos+1 < len(l.text) && isASCIIDigit(l.text[l.pos+1])):
 			l.scanNumber()
@@ -88,9 +110,20 @@ func (l *lexer) run() {
 }
 
 func (l *lexer) consumeWhitespace() {
-	for l.pos < len(l.text) && isSpace(l.text[l.pos]) {
-		l.pos++
+	for l.pos < len(l.text) {
+		r, size := utf8.DecodeRuneInString(l.text[l.pos:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		l.pos += size
 	}
+}
+
+// snowflakeURISlash prevents the second slash in URI schemes such as
+// file:///path and s3://bucket from being mistaken for a SQL line comment.
+// Snowflake still treats a standalone // after whitespace as a comment.
+func snowflakeURISlash(text string, pos int) bool {
+	return pos > 0 && (text[pos-1] == ':' || (text[pos-1] == '/' && pos > 1 && text[pos-2] == ':'))
 }
 
 func (l *lexer) scanLineComment(prefix int) {
@@ -105,6 +138,25 @@ func (l *lexer) scanLineComment(prefix int) {
 func (l *lexer) scanBlockComment() {
 	start := l.pos
 	l.pos += 2
+	if l.options.Dialect == DialectSnowflake {
+		for l.pos < len(l.text) && !strings.HasPrefix(l.text[l.pos:], "*/") {
+			l.pos += runeWidth(l.text[l.pos:])
+		}
+		if strings.HasPrefix(l.text[l.pos:], "*/") {
+			l.pos += 2
+			l.emit(TokenComment, start, l.pos)
+			return
+		}
+		l.emit(TokenUnterminatedComment, start, l.pos)
+		l.diagnostics = append(l.diagnostics, Diagnostic{
+			Severity: SeverityError,
+			Code:     "LEX_UNTERMINATED_COMMENT",
+			Message:  "unterminated block comment; expected */",
+			Span:     Span{Start: start, End: l.pos},
+			Found:    TokenUnterminatedComment,
+		})
+		return
+	}
 	depth := 1
 	for l.pos < len(l.text) && depth > 0 {
 		switch {
@@ -134,6 +186,7 @@ func (l *lexer) scanBlockComment() {
 
 func (l *lexer) scanQuoted(quote byte) {
 	start := l.pos
+	backslashEscapes := quote == '\'' && ((start > 0 && (l.text[start-1] == 'e' || l.text[start-1] == 'E') && (start == 1 || !isIdentifierPart(rune(l.text[start-2])))) || l.options.Dialect == DialectAthena || l.options.Dialect == DialectMySQL)
 	l.pos++
 	closed := false
 	for l.pos < len(l.text) {
@@ -146,14 +199,12 @@ func (l *lexer) scanQuoted(quote byte) {
 			l.pos += runeWidth(l.text[l.pos:])
 			continue
 		}
-		if l.text[l.pos] == '\\' && quote == '\'' && l.pos+1 < len(l.text) && l.text[l.pos+1] == quote {
-			// Treat a quote after a lone trailing backslash as the closing
-			// delimiter. When another quote follows, retain the usual escaped
-			// quote behavior (for example '\\'' inside a string).
-			if l.pos+2 < len(l.text) && l.text[l.pos+2] == quote {
-				l.pos += 2
-				continue
-			}
+		if l.text[l.pos] == '\\' && backslashEscapes && l.pos+1 < len(l.text) {
+			// PostgreSQL-style E strings use backslash escapes. Treat the
+			// escaped byte as part of the string so an escaped quote cannot
+			// prematurely terminate the token.
+			l.pos += 2
+			continue
 		}
 		if l.text[l.pos] != quote {
 			l.pos += runeWidth(l.text[l.pos:])
@@ -194,6 +245,68 @@ func (l *lexer) scanQuoted(quote byte) {
 	}
 }
 
+func (l *lexer) scanBigQueryPrefixedString() {
+	l.scanBigQueryString(1)
+}
+
+func (l *lexer) scanBigQueryString(prefixLength int) {
+	start := l.pos
+	prefix := byte(0)
+	if prefixLength > 0 {
+		prefix = l.text[l.pos]
+		l.pos += prefixLength
+	}
+	quote := l.text[l.pos]
+	l.pos++
+	delimiterLength := 1
+	if l.pos+1 < len(l.text) && l.text[l.pos] == quote && l.text[l.pos+1] == quote {
+		delimiterLength = 3
+		l.pos += 2
+	}
+	closed := false
+	for l.pos < len(l.text) {
+		if delimiterLength == 3 {
+			if l.text[l.pos] == '\\' && l.pos+1 < len(l.text) {
+				l.pos += 2
+				continue
+			}
+			if l.pos+2 < len(l.text) && l.text[l.pos] == quote && l.text[l.pos+1] == quote && l.text[l.pos+2] == quote {
+				l.pos += 3
+				closed = true
+				break
+			}
+			l.pos += runeWidth(l.text[l.pos:])
+			continue
+		}
+		if l.text[l.pos] == '\\' && prefix != 'r' && prefix != 'R' && l.pos+1 < len(l.text) {
+			l.pos += 2
+			continue
+		}
+		if l.text[l.pos] == quote {
+			if l.pos+1 < len(l.text) && l.text[l.pos+1] == quote {
+				l.pos += 2
+				continue
+			}
+			l.pos++
+			closed = true
+			break
+		}
+		l.pos += runeWidth(l.text[l.pos:])
+	}
+	if !closed {
+		l.emit(TokenUnterminatedString, start, l.pos)
+		l.diagnostics = append(l.diagnostics, Diagnostic{
+			Severity: SeverityError,
+			Code:     "LEX_UNTERMINATED_STRING",
+			Message:  "unterminated BigQuery string literal; expected a closing quote",
+			Span:     Span{Start: start, End: l.pos},
+			Found:    TokenUnterminatedString,
+		})
+		return
+	}
+	l.emit(TokenString, start, l.pos)
+}
+
 func (l *lexer) scanDollarQuoted() bool {
 	start := l.pos
 	endTag := strings.IndexByte(l.text[l.pos+1:], '$')
@@ -205,11 +318,15 @@ func (l *lexer) scanDollarQuoted() bool {
 	if len(tag) < 2 {
 		return false
 	}
-	for i := 1; i < len(tag)-1; i++ {
-		if i == 1 && tag[i] != '_' && !isASCIILetter(tag[i]) {
+	for offset, r := range tag[1 : len(tag)-1] {
+		if offset == 0 && unicode.IsDigit(r) {
 			return false
 		}
-		if tag[i] != '_' && !isASCIILetter(tag[i]) && !isASCIIDigit(tag[i]) {
+		// PostgreSQL spells tags as identifiers, while DuckDB also accepts
+		// Unicode symbol tags (for example $🦆$...$🦆$). Keep the lexer
+		// permissive for those tags without mistaking punctuation or whitespace
+		// for a dollar-quote opener.
+		if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.Is(unicode.Symbol, r) {
 			return false
 		}
 	}
@@ -239,6 +356,15 @@ func (l *lexer) scanParameter() {
 		l.pos++
 	}
 	l.emit(TokenParameter, start, l.pos)
+}
+
+func (l *lexer) scanDuckDBPositionalColumn() {
+	start := l.pos
+	l.pos++
+	for l.pos < len(l.text) && isASCIIDigit(l.text[l.pos]) {
+		l.pos++
+	}
+	l.emit(TokenIdentifier, start, l.pos)
 }
 
 func (l *lexer) scanColonParameter() {
@@ -279,6 +405,26 @@ func (l *lexer) scanAtParameter() {
 		}
 	}
 	l.emit(TokenParameter, start, l.pos)
+}
+
+func (l *lexer) scanTemplateParameter() {
+	start := l.pos
+	l.pos += 2
+	for l.pos < len(l.text) && l.text[l.pos] != '}' {
+		l.pos += runeWidth(l.text[l.pos:])
+	}
+	if l.pos < len(l.text) {
+		l.pos++
+	} else {
+		l.diagnostics = append(l.diagnostics, Diagnostic{
+			Severity: SeverityError,
+			Code:     "LEX_UNTERMINATED_TEMPLATE",
+			Message:  "unterminated ${...} template parameter; expected }",
+			Span:     Span{Start: start, End: l.pos},
+			Found:    TokenUnknown,
+		})
+	}
+	l.emit(TokenIdentifier, start, l.pos)
 }
 
 func (l *lexer) scanNumber() {
@@ -343,7 +489,7 @@ func (l *lexer) scanIdentifier() {
 func (l *lexer) scanOperator() {
 	start := l.pos
 	for _, operator := range []string{
-		"!~*", "#>>", "->>", "-|-", "??", "!~", "::", ">=", "<=", "<>", "!=", "||", "&&", "->", "=>", ":=", "<<", ">>", "**", "#>", "@>", "<@", "?&", "?|",
+		"!~~*", "!~~", "~~~", "~~", "^@", "!~*", "~*", "#>>", "->>", "-|-", "<=>", "??", "!~", "::", ">=", "<=", "<>", "!=", "||", "&&", "->", "=>", ":=", "<<", ">>", "**", "#>", "@>", "<@", "?&", "?|",
 	} {
 		if strings.HasPrefix(l.text[l.pos:], operator) {
 			l.pos += len(operator)
@@ -376,6 +522,14 @@ func (l *lexer) emit(kind TokenKind, start, end int) {
 
 func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'
+}
+
+func isSpaceAt(text string, pos int) bool {
+	if pos < 0 || pos >= len(text) {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(text[pos:])
+	return unicode.IsSpace(r)
 }
 
 func isPunctuation(c byte) bool {
@@ -413,7 +567,7 @@ func isIdentifierContinueAt(text string, pos int) bool {
 }
 
 func isIdentifierPart(r rune) bool {
-	return r == '_' || r == '$' || unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)
+	return r == '_' || r == '$' || r == '#' || r == '@' || unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)
 }
 
 func runeWidth(text string) int {

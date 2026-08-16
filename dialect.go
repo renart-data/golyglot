@@ -50,6 +50,9 @@ const (
 // ParseDialect accepts Polyglot-style names and common aliases.
 func ParseDialect(name string) (Dialect, error) {
 	normalized := strings.ToLower(strings.TrimSpace(name))
+	if comma := strings.IndexByte(normalized, ','); comma >= 0 {
+		normalized = strings.TrimSpace(normalized[:comma])
+	}
 	switch normalized {
 	case "", "generic", "ansi":
 		return DialectGeneric, nil

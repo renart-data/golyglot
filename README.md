@@ -29,6 +29,8 @@ Supported features:
 - Compact query facts for projections, relations, CTEs, and set operations
 - AST walking, transformation, search, and column-reference utilities
 
-Alpha release. Run `make release-check`; use `make fixtures` for optional
-upstream Polyglot compatibility fixtures. The Astro/Starlight docs and
-Monaco/WASM demo live under `docs/`; use `make docs-build`.
+Alpha release. Run `make release-check`; use `make fixtures` to refresh the
+checked-in Polyglot/SQLGlot and custom DataFusion test snapshots, and
+`make test-polyglot` to validate their inventory plus the current parser and
+identity gates. The Astro/Starlight docs and Monaco/WASM demo live under
+`docs/`; use `make docs-build`.

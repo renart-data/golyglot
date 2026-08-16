@@ -1,8 +1,9 @@
 .PHONY: test fmt-check test-cgo-free test-race ci release-check test-polyglot test-polyglot-identity fixtures bench-golyglot bench-polyglot bench-polyglot-transpile docs-install docs-dev docs-build
 
-POLYGLOT_REF ?= main
+POLYGLOT_REF ?= d5aa0d493c281398c9fdbc6febd3577f10ceac2f
 POLYGLOT_CACHE ?= .cache/polyglot
-POLYGLOT_FIXTURES ?= testdata/polyglot
+POLYGLOT_FIXTURES ?= testdata/polyglot/sqlglot_fixtures
+POLYGLOT_CUSTOM_FIXTURES ?= testdata/polyglot/custom_fixtures
 POLYGLOT_BENCH_ENV ?= CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16
 POLYGLOT_BENCH_PROFILE ?= dev
 
@@ -30,22 +31,30 @@ ci: fmt-check
 release-check: ci
 
 test-polyglot:
-	GOLYGLOT_RUN_FULL_FIXTURES=1 go test -run TestPolyglotFullParserFixtureIfPresent -count=1 ./...
+	go test -run '^(TestSQLGlot(FixtureCorpusShape|FixtureSourceIsPresent|ParserFixtures|IdentityFixtures)|TestPolyglotCustomFixtureCorpusShape)$$' -count=1 ./...
 
 test-polyglot-identity:
-	GOLYGLOT_RUN_IDENTITY_FIXTURES=1 go test -run TestPolyglotFullIdentityFixtureIfPresent -count=1 ./...
+	go test -run '^TestSQLGlotIdentityFixtures$$' -count=1 ./...
 
-# Extract the upstream SQLGlot fixture JSON without adding SQLGlot, Rust, or
-# any native library to the Go module. The generated files remain test data and
-# are intentionally not production dependencies.
+# Extract the complete upstream SQLGlot and Polyglot custom fixture snapshots
+# without adding SQLGlot, Rust, or any native library to the Go module. The
+# generated files are test data only and are intentionally not production
+# dependencies.
 fixtures:
 	@mkdir -p "$(dir $(POLYGLOT_CACHE))"
-	@if [ ! -d "$(POLYGLOT_CACHE)/.git" ]; then git clone --depth=1 --branch "$(POLYGLOT_REF)" https://github.com/tobilg/polyglot.git "$(POLYGLOT_CACHE)"; fi
+	@if [ ! -d "$(POLYGLOT_CACHE)/.git" ]; then \
+		git clone --filter=blob:none --no-checkout https://github.com/tobilg/polyglot.git "$(POLYGLOT_CACHE)"; \
+		git -C "$(POLYGLOT_CACHE)" fetch --depth=1 origin "$(POLYGLOT_REF)"; \
+		git -C "$(POLYGLOT_CACHE)" checkout --detach FETCH_HEAD; \
+	else \
+		actual=$$(git -C "$(POLYGLOT_CACHE)" rev-parse HEAD) || exit 1; \
+		requested=$$(git -C "$(POLYGLOT_CACHE)" rev-parse "$(POLYGLOT_REF)" 2>/dev/null) || { echo "cannot resolve POLYGLOT_REF=$(POLYGLOT_REF) in $(POLYGLOT_CACHE)" >&2; exit 1; }; \
+		test "$$actual" = "$$requested" || { echo "$(POLYGLOT_CACHE) is at $$actual, want $$requested; use POLYGLOT_CACHE=/path/to/fresh/cache" >&2; exit 1; }; \
+	fi
 	@cd "$(POLYGLOT_CACHE)" && make setup-sqlglot extract-fixtures
-	@mkdir -p "$(POLYGLOT_FIXTURES)"
-	@cp "$(POLYGLOT_CACHE)/crates/polyglot-sql/tests/sqlglot_fixtures/parser.json" "$(POLYGLOT_FIXTURES)/parser.full.json"
-	@cp "$(POLYGLOT_CACHE)/crates/polyglot-sql/tests/sqlglot_fixtures/identity.json" "$(POLYGLOT_FIXTURES)/identity.full.json"
-	@cp "$(POLYGLOT_CACHE)/crates/polyglot-sql/tests/sqlglot_fixtures/pretty.json" "$(POLYGLOT_FIXTURES)/pretty.full.json"
+	@mkdir -p "$(POLYGLOT_FIXTURES)" "$(POLYGLOT_CUSTOM_FIXTURES)/datafusion"
+	@cp -R "$(POLYGLOT_CACHE)/crates/polyglot-sql/tests/sqlglot_fixtures/." "$(POLYGLOT_FIXTURES)/"
+	@cp -R "$(POLYGLOT_CACHE)/crates/polyglot-sql/tests/custom_fixtures/datafusion/." "$(POLYGLOT_CUSTOM_FIXTURES)/datafusion/"
 
 bench-golyglot:
 	go test ./benchmarks -run '^$$' -bench . -benchmem -count=5

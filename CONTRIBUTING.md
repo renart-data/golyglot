@@ -1,4 +1,6 @@
 # Contributing
 
 Run `make release-check` before submitting changes. Run `make fixtures` when
-working on Polyglot compatibility; generated full fixtures stay uncommitted.
+refreshing Polyglot compatibility snapshots, then run `make test-polyglot`.
+The snapshots are checked in so the compatibility gates are reproducible
+without SQLGlot or Rust installed.

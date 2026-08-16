@@ -27,6 +27,13 @@ type identityFixture struct {
 	} `json:"tests"`
 }
 
+func sqlglotFixturePath(name string) string {
+	if root := os.Getenv("GOLYGLOT_SQLGLOT_FIXTURES"); root != "" {
+		return filepath.Join(root, name)
+	}
+	return filepath.Join("testdata", "polyglot", "sqlglot_fixtures", name)
+}
+
 // TestPolyglotParserFixtureShape consumes the same parser.json shape emitted
 // by Polyglot's SQLGlot extraction tool. Generated full fixtures can be placed
 // in testdata/polyglot without changing this test.
@@ -35,12 +42,21 @@ func TestPolyglotParserFixtureShape(t *testing.T) {
 }
 
 func TestPolyglotFullParserFixtureIfPresent(t *testing.T) {
-	if os.Getenv("GOLYGLOT_RUN_FULL_FIXTURES") != "1" {
-		t.Skip("set GOLYGLOT_RUN_FULL_FIXTURES=1 to run the generated upstream fixture")
-	}
-	path := filepath.Join("testdata", "polyglot", "parser.full.json")
+	path := sqlglotFixturePath("parser.json")
 	if _, err := os.Stat(path); err != nil {
-		t.Skip("full upstream fixture not present; run make fixtures")
+		legacyPath := filepath.Join("testdata", "polyglot", "parser.full.json")
+		if _, legacyErr := os.Stat(legacyPath); legacyErr != nil {
+			t.Skip("upstream fixture not present; run make fixtures")
+		}
+		path = legacyPath
+	}
+	runParserFixture(t, path)
+}
+
+func TestSQLGlotParserFixtures(t *testing.T) {
+	path := sqlglotFixturePath("parser.json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("SQLGlot parser fixture is missing: %v; run make fixtures", err)
 	}
 	runParserFixture(t, path)
 }
@@ -87,13 +103,27 @@ func runParserFixture(t *testing.T, path string) {
 }
 
 func TestPolyglotFullIdentityFixtureIfPresent(t *testing.T) {
-	if os.Getenv("GOLYGLOT_RUN_IDENTITY_FIXTURES") != "1" {
-		t.Skip("set GOLYGLOT_RUN_IDENTITY_FIXTURES=1 to run generated identity fixtures")
-	}
-	path := filepath.Join("testdata", "polyglot", "identity.full.json")
+	path := sqlglotFixturePath("identity.json")
 	if _, err := os.Stat(path); err != nil {
-		t.Skip("full upstream fixture not present; run make fixtures")
+		legacyPath := filepath.Join("testdata", "polyglot", "identity.full.json")
+		if _, legacyErr := os.Stat(legacyPath); legacyErr != nil {
+			t.Skip("upstream fixture not present; run make fixtures")
+		}
+		path = legacyPath
 	}
+	runIdentityFixture(t, path)
+}
+
+func TestSQLGlotIdentityFixtures(t *testing.T) {
+	path := sqlglotFixturePath("identity.json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("SQLGlot identity fixture is missing: %v; run make fixtures", err)
+	}
+	runIdentityFixture(t, path)
+}
+
+func runIdentityFixture(t *testing.T, path string) {
+	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
