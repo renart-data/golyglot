@@ -1,4 +1,12 @@
-.PHONY: test test-tools fmt-check test-cgo-free test-race ci release-check test-polyglot test-polyglot-full test-polyglot-ffi-extended test-polyglot-oracle test-polyglot-identity fetch-polyglot-ffi fixtures select-benchmark-corpus bench-golyglot bench-golyglot-corpus bench-workload bench-polyglot-ffi bench-polyglot-ffi-corpus bench-polyglot bench-polyglot-transpile docs-install docs-dev docs-build
+.PHONY: \
+	bench-golyglot bench-golyglot-corpus bench-polyglot \
+	bench-polyglot-ffi bench-polyglot-ffi-corpus bench-polyglot-transpile \
+	bench-workload build-polyglot-ffi-bench check-polyglot-ffi \
+	check-polyglot-source ci docs-build docs-dev docs-install \
+	fetch-polyglot-ffi fixtures fmt-check release-check \
+	select-benchmark-corpus test test-cgo-free test-polyglot \
+	test-polyglot-ffi-extended test-polyglot-full test-polyglot-identity \
+	test-polyglot-oracle test-race test-tools
 
 POLYGLOT_REF ?= d5aa0d493c281398c9fdbc6febd3577f10ceac2f
 POLYGLOT_CACHE ?= .cache/polyglot
@@ -56,7 +64,10 @@ test-polyglot:
 test-polyglot-full:
 	GOMAXPROCS=2 CGO_ENABLED=0 GOLYGLOT_FULL_FIXTURES=1 go test -p 1 -run '^TestSQLGlotFullFixtures$$' -count=1 ./...
 
-test-polyglot-ffi-extended:
+check-polyglot-ffi:
+	@test -f "$(POLYGLOT_FFI_PATH)" || { echo "missing $(POLYGLOT_FFI_PATH); run make fetch-polyglot-ffi" >&2; exit 1; }
+
+test-polyglot-ffi-extended: check-polyglot-ffi
 	python3 tools/polyglot_ffi_oracle.py --library "$(POLYGLOT_FFI_PATH)"
 
 # Backward-compatible alias. This is an extended public-FFI comparison, not
@@ -100,8 +111,7 @@ fetch-polyglot-ffi:
 	test "$$actual" = "$$expected" || { echo "checksum mismatch for $(POLYGLOT_FFI_ARCHIVE)" >&2; exit 1; }
 	@tar -xzf "$(POLYGLOT_FFI_ARCHIVE)" -C "$(POLYGLOT_FFI_CACHE)/$(POLYGLOT_FFI_VERSION)"
 
-select-benchmark-corpus:
-	@test -f "$(POLYGLOT_FFI_PATH)" || (echo "missing $(POLYGLOT_FFI_PATH); run make fetch-polyglot-ffi" && exit 1)
+select-benchmark-corpus: check-polyglot-ffi
 	python3 tools/select_polyglot_benchmark_cases.py --library "$(POLYGLOT_FFI_PATH)" --output "$(POLYGLOT_FFI_CORPUS_MANIFEST)"
 
 bench-golyglot:
@@ -114,27 +124,28 @@ bench-workload:
 	@test -n "$(BENCH_WORKLOAD)" || (echo "set BENCH_WORKLOAD=/path/to/workload.json" && exit 1)
 	GOLYGLOT_BENCH_WORKLOAD="$(abspath $(BENCH_WORKLOAD))" go test ./benchmarks -run '^$$' -bench '^BenchmarkWorkload$$' -benchmem -count="$(BENCH_COUNT)" -benchtime="$(BENCH_TIME)"
 
-bench-polyglot-ffi:
-	@test -f "$(POLYGLOT_FFI_PATH)" || (echo "missing $(POLYGLOT_FFI_PATH); run make fetch-polyglot-ffi" && exit 1)
+build-polyglot-ffi-bench: check-polyglot-ffi
+	@test -f "$(POLYGLOT_FFI_DIR)/polyglot_sql.h" || { echo "missing $(POLYGLOT_FFI_DIR)/polyglot_sql.h; run make fetch-polyglot-ffi" >&2; exit 1; }
 	@mkdir -p "$(dir $(POLYGLOT_FFI_BENCH_BIN))"
 	$(CC) -O2 -std=c11 -Wall -Wextra -Wpedantic -Werror -I"$(POLYGLOT_FFI_DIR)" tools/polyglot_ffi_bench.c -L"$(POLYGLOT_FFI_DIR)" -lpolyglot_sql_ffi -o "$(POLYGLOT_FFI_BENCH_BIN)"
+
+bench-polyglot-ffi: build-polyglot-ffi-bench
 	LD_LIBRARY_PATH="$(POLYGLOT_FFI_DIR):$${LD_LIBRARY_PATH:-}" "$(POLYGLOT_FFI_BENCH_BIN)"
 	LD_LIBRARY_PATH="$(POLYGLOT_FFI_DIR):$${LD_LIBRARY_PATH:-}" python3 tools/polyglot_ffi_fixture_bench.py --binary "$(POLYGLOT_FFI_BENCH_BIN)" --library "$(POLYGLOT_FFI_PATH)" --manifest "$(POLYGLOT_FFI_FIXTURE_MANIFEST)"
 
-bench-polyglot-ffi-corpus:
-	@test -f "$(POLYGLOT_FFI_PATH)" || (echo "missing $(POLYGLOT_FFI_PATH); run make fetch-polyglot-ffi" && exit 1)
-	@mkdir -p "$(dir $(POLYGLOT_FFI_BENCH_BIN))"
-	$(CC) -O2 -std=c11 -Wall -Wextra -Wpedantic -Werror -I"$(POLYGLOT_FFI_DIR)" tools/polyglot_ffi_bench.c -L"$(POLYGLOT_FFI_DIR)" -lpolyglot_sql_ffi -o "$(POLYGLOT_FFI_BENCH_BIN)"
+bench-polyglot-ffi-corpus: build-polyglot-ffi-bench
 	POLYGLOT_BENCH_SAMPLES="$(CORPUS_BENCH_COUNT)" POLYGLOT_BENCH_DURATION_MS="$(CORPUS_FFI_BENCH_DURATION_MS)" LD_LIBRARY_PATH="$(POLYGLOT_FFI_DIR):$${LD_LIBRARY_PATH:-}" python3 tools/polyglot_ffi_fixture_bench.py --binary "$(POLYGLOT_FFI_BENCH_BIN)" --library "$(POLYGLOT_FFI_PATH)" --manifest "$(POLYGLOT_FFI_CORPUS_MANIFEST)"
 
-bench-polyglot:
+check-polyglot-source:
 	@test -d "$(POLYGLOT_CACHE)/.git" || (echo "missing $(POLYGLOT_CACHE); see benchmarks/README.md" && exit 1)
-	@test "$$(git -C "$(POLYGLOT_CACHE)" rev-parse HEAD)" = "$$(git -C "$(POLYGLOT_CACHE)" rev-parse d5aa0d4)" || (echo "$(POLYGLOT_CACHE) must be at Polyglot d5aa0d4" && exit 1)
+	@actual=$$(git -C "$(POLYGLOT_CACHE)" rev-parse HEAD) || exit 1; \
+	requested=$$(git -C "$(POLYGLOT_CACHE)" rev-parse "$(POLYGLOT_REF)" 2>/dev/null) || { echo "cannot resolve POLYGLOT_REF=$(POLYGLOT_REF) in $(POLYGLOT_CACHE)" >&2; exit 1; }; \
+	test "$$actual" = "$$requested" || { echo "$(POLYGLOT_CACHE) is at $$actual, want $$requested" >&2; exit 1; }
+
+bench-polyglot: check-polyglot-source
 	@cd "$(POLYGLOT_CACHE)" && CARGO_PROFILE_DEV_DEBUG=0 cargo bench --profile "$(POLYGLOT_BENCH_PROFILE)" -p polyglot-sql --no-default-features --bench parsing -- --noplot
 
-bench-polyglot-transpile:
-	@test -d "$(POLYGLOT_CACHE)/.git" || (echo "missing $(POLYGLOT_CACHE); see benchmarks/README.md" && exit 1)
-	@test "$$(git -C "$(POLYGLOT_CACHE)" rev-parse HEAD)" = "$$(git -C "$(POLYGLOT_CACHE)" rev-parse d5aa0d4)" || (echo "$(POLYGLOT_CACHE) must be at Polyglot d5aa0d4" && exit 1)
+bench-polyglot-transpile: check-polyglot-source
 	@cd "$(POLYGLOT_CACHE)" && $(POLYGLOT_BENCH_ENV) cargo bench -p polyglot-sql --bench transpile -- --noplot
 
 docs-install:

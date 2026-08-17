@@ -30,7 +30,9 @@ Supported features:
 - AST walking, transformation, search, and column-reference utilities
 
 Alpha release. Run `make release-check`; use `make fixtures` to refresh the
-checked-in Polyglot/SQLGlot and custom DataFusion test snapshots, and
-`make test-polyglot` to validate their inventory plus the current parser and
-identity gates. The Astro/Starlight docs and Monaco/WASM demo live under
-`docs/`; use `make docs-build`.
+checked-in Polyglot/SQLGlot and custom DataFusion test snapshots. The quick
+compatibility gate is `make test-polyglot`, while `make test-polyglot-full`
+checks all 14,091 cases. Reproducible Go/Polyglot comparisons and custom
+workloads are documented in [benchmarks/README.md](benchmarks/README.md). The
+Astro/Starlight docs and Monaco/WASM demo live under `docs/`; use
+`make docs-build`.

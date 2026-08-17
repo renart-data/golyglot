@@ -6,28 +6,28 @@ import (
 	"unicode/utf8"
 )
 
-var sqlKeywords = map[string]struct{}{
-	"ALL": {}, "AND": {}, "AS": {}, "ASC": {}, "BETWEEN": {}, "BY": {}, "IF": {},
-	"CASE": {}, "CAST": {}, "COLLATE": {}, "CROSS": {}, "CURRENT": {},
-	"CURRENT_DATE": {}, "CURRENT_TIME": {}, "CURRENT_TIMESTAMP": {}, "CREATE": {}, "DELETE": {}, "AT": {},
-	"DESC": {}, "DISTINCT": {}, "ELSE": {}, "END": {}, "ESCAPE": {},
-	"EXCEPT": {}, "EXISTS": {}, "FALSE": {}, "FETCH": {}, "FIRST": {},
-	"FOLLOWING": {}, "FOR": {}, "FROM": {}, "FULL": {}, "GROUP": {}, "GLOB": {},
-	"HAVING": {}, "IN": {}, "INNER": {}, "INSERT": {}, "INTERSECT": {},
-	"INTO": {}, "IS": {}, "JOIN": {}, "LATERAL": {}, "LAST": {}, "LEFT": {},
-	"LIKE": {}, "LIMIT": {}, "NOT": {}, "NULL": {}, "NULLS": {}, "OFFSET": {},
-	"ON": {}, "OR": {}, "ORDER": {}, "OPTION": {}, "OUTER": {}, "OVER": {}, "PARTITION": {}, "PIVOT": {}, "UNPIVOT": {}, "NATURAL": {}, "SEMI": {}, "ANTI": {},
-	"PRECEDING": {}, "QUALIFY": {}, "RANGE": {}, "RIGHT": {}, "RETURNING": {},
-	"ROWS": {}, "ROW": {}, "SELECT": {}, "TABLE": {}, "TABLESAMPLE": {}, "REPLACE": {}, "THEN": {}, "TOP": {}, "TRUE": {},
-	"UNION": {}, "UNNEST": {}, "UPDATE": {}, "USING": {}, "VALUES": {},
-	"WHEN": {}, "WHERE": {}, "WINDOW": {}, "WITH": {}, "ALTER": {}, "DROP": {},
-	"EXCLUDE": {}, "UNDROP": {}, "MD5_HEX": {},
-	"MERGE": {}, "TRUNCATE": {}, "GRANT": {}, "REVOKE": {}, "EXPLAIN": {},
-	"SHOW": {}, "DESCRIBE": {}, "USE": {}, "OPEN": {}, "CACHE": {}, "UNCACHE": {}, "LOAD": {}, "COMMENT": {}, "PRAGMA": {}, "KILL": {}, "CONNECT": {}, "STRAIGHT_JOIN": {},
-	"CLUSTER": {}, "SAMPLE": {}, "SETTINGS": {}, "MATCH_RECOGNIZE": {}, "INDEXED": {}, "REFRESH": {}, "DEALLOCATE": {}, "RESET": {}, "EXECUTE": {},
-	"COPY": {}, "UNLOAD": {}, "PRINT": {},
-	"BEGIN": {}, "START": {}, "COMMIT": {}, "ROLLBACK": {}, "VACUUM": {}, "ANALYZE": {}, "EXPORT": {}, "IMPORT": {}, "CALL": {}, "EXEC": {}, "DECLARE": {}, "LOOP": {}, "REPEAT": {}, "WHILE": {}, "MODEL": {}, "CORRESPONDING": {}, "STRICT": {},
-	"ATTACH": {}, "DETACH": {}, "EXCHANGE": {}, "INSTALL": {}, "CHECKPOINT": {}, "OPTIMIZE": {}, "SUMMARIZE": {}, "SEQUENCE": {}, "FORCE": {}, "SYSTEM": {},
+var sqlKeywordSpellings = [...]string{
+	"ALL", "AND", "AS", "ASC", "BETWEEN", "BY", "IF",
+	"CASE", "CAST", "COLLATE", "CROSS", "CURRENT",
+	"CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CREATE", "DELETE", "AT",
+	"DESC", "DISTINCT", "ELSE", "END", "ESCAPE",
+	"EXCEPT", "EXISTS", "FALSE", "FETCH", "FIRST",
+	"FOLLOWING", "FOR", "FROM", "FULL", "GROUP", "GLOB",
+	"HAVING", "IN", "INNER", "INSERT", "INTERSECT",
+	"INTO", "IS", "JOIN", "LATERAL", "LAST", "LEFT",
+	"LIKE", "LIMIT", "NOT", "NULL", "NULLS", "OFFSET",
+	"ON", "OR", "ORDER", "OPTION", "OUTER", "OVER", "PARTITION", "PIVOT", "UNPIVOT", "NATURAL", "SEMI", "ANTI",
+	"PRECEDING", "QUALIFY", "RANGE", "RIGHT", "RETURNING",
+	"ROWS", "ROW", "SELECT", "TABLE", "TABLESAMPLE", "REPLACE", "THEN", "TOP", "TRUE",
+	"UNION", "UNNEST", "UPDATE", "USING", "VALUES",
+	"WHEN", "WHERE", "WINDOW", "WITH", "ALTER", "DROP",
+	"EXCLUDE", "UNDROP", "MD5_HEX",
+	"MERGE", "TRUNCATE", "GRANT", "REVOKE", "EXPLAIN",
+	"SHOW", "DESCRIBE", "USE", "OPEN", "CACHE", "UNCACHE", "LOAD", "COMMENT", "PRAGMA", "KILL", "CONNECT", "STRAIGHT_JOIN",
+	"CLUSTER", "SAMPLE", "SETTINGS", "MATCH_RECOGNIZE", "INDEXED", "REFRESH", "DEALLOCATE", "RESET", "EXECUTE",
+	"COPY", "UNLOAD", "PRINT",
+	"BEGIN", "START", "COMMIT", "ROLLBACK", "VACUUM", "ANALYZE", "EXPORT", "IMPORT", "CALL", "EXEC", "DECLARE", "LOOP", "REPEAT", "WHILE", "MODEL", "CORRESPONDING", "STRICT",
+	"ATTACH", "DETACH", "EXCHANGE", "INSTALL", "CHECKPOINT", "OPTIMIZE", "SUMMARIZE", "SEQUENCE", "FORCE", "SYSTEM",
 }
 
 type sqlWordMetadata struct {
@@ -39,8 +39,8 @@ type sqlWordMetadata struct {
 var sqlWordLookup = buildSQLWordLookup()
 
 func buildSQLWordLookup() map[uint64]sqlWordMetadata {
-	lookup := make(map[uint64]sqlWordMetadata, len(sqlKeywords)+len(tokenWordDefinitions))
-	for keyword := range sqlKeywords {
+	lookup := make(map[uint64]sqlWordMetadata, len(sqlKeywordSpellings)+len(tokenWordDefinitions))
+	for _, keyword := range sqlKeywordSpellings {
 		hash := foldedSQLWordHash(keyword)
 		if existing, ok := lookup[hash]; ok && existing.text != keyword {
 			panic("SQL word hash collision")
