@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -14,8 +15,8 @@ import (
 //
 //	GOLYGLOT_FULL_FIXTURES=1 go test -run '^TestSQLGlotFullFixtures$' ./...
 //
-// The test remains pure Go; the released Polyglot FFI is used separately as
-// an oracle when comparing versioned behavior, never as a Go test dependency.
+// The test remains pure Go; the released Polyglot FFI is used separately for
+// an extended exact-output comparison, never as a Go test dependency.
 
 type fullDialectFixture struct {
 	Dialect       string                  `json:"dialect"`
@@ -26,6 +27,7 @@ type fullDialectFixture struct {
 type fullIdentityCase struct {
 	SQL      string  `json:"sql"`
 	Expected *string `json:"expected"`
+	Identify bool    `json:"identify"`
 }
 
 type fullTranspilationCase struct {
@@ -86,16 +88,24 @@ func (s *fullFixtureStats) record(id, sql, want, got string, err error) {
 		return
 	}
 	s.Failed++
-	if len(s.Failures) < 50 {
+	if len(s.Failures) < fullFixtureFailureLimit() {
 		s.Failures = append(s.Failures, fullFixtureFailure{ID: id, SQL: sql, Want: want, Got: got, Err: err})
 	}
+}
+
+func fullFixtureFailureLimit() int {
+	limit, err := strconv.Atoi(strings.TrimSpace(os.Getenv("GOLYGLOT_FULL_FAILURE_LIMIT")))
+	if err != nil || limit < 1 {
+		return 50
+	}
+	return limit
 }
 
 func (s *fullFixtureStats) merge(other fullFixtureStats) {
 	s.Passed += other.Passed
 	s.Failed += other.Failed
 	for _, failure := range other.Failures {
-		if len(s.Failures) == 50 {
+		if len(s.Failures) == fullFixtureFailureLimit() {
 			break
 		}
 		s.Failures = append(s.Failures, failure)
@@ -271,7 +281,7 @@ func runFullDialectFixtures(t *testing.T, path, fileDialect string) fullFixtureS
 	if dialectName == "" {
 		dialectName = fileDialect
 	}
-	dialect, err := ParseDialect(dialectName)
+	dialect, dialectVersion, err := fullParseDialect(dialectName)
 	if err != nil {
 		if len(fixture.Identity) == 0 && len(fixture.Transpilation) == 0 {
 			return fullFixtureStats{}
@@ -286,23 +296,23 @@ func runFullDialectFixtures(t *testing.T, path, fileDialect string) fullFixtureS
 		if test.Expected != nil {
 			want = *test.Expected
 		}
-		got, err := fullTranspile(test.SQL, dialect, dialect, want)
+		got, err := fullIdentityTranspile(test.SQL, dialect, dialect, want, test.Identify, dialectVersion)
 		identityStats.record(fmt.Sprintf("%s identity:%d", fileDialect, index), test.SQL, want, got, err)
 	}
 	stats.merge(identityStats)
 	var transpilationStats fullFixtureStats
 	for index, test := range fixture.Transpilation {
 		for targetName, want := range test.Write {
-			target, err := ParseDialect(targetName)
+			target, targetVersion, err := fullParseDialect(targetName)
 			if err != nil {
 				transpilationStats.record(fmt.Sprintf("%s write %s:%d", fileDialect, targetName, index), test.SQL, want, "", err)
 				continue
 			}
-			got, err := fullTranspile(test.SQL, dialect, target, want)
+			got, err := fullTranspile(test.SQL, dialect, target, want, targetVersion)
 			transpilationStats.record(fmt.Sprintf("%s write %s:%d", fileDialect, targetName, index), test.SQL, want, got, err)
 		}
 		for sourceName, sourceSQL := range test.Read {
-			source, err := ParseDialect(sourceName)
+			source, _, err := fullParseDialect(sourceName)
 			if err != nil {
 				transpilationStats.record(fmt.Sprintf("%s read %s:%d", fileDialect, sourceName, index), sourceSQL, test.SQL, "", err)
 				continue
@@ -318,7 +328,7 @@ func runFullDialectFixtures(t *testing.T, path, fileDialect string) fullFixtureS
 
 func runFullCustomFixture(t *testing.T, path, dialectName, category string) fullFixtureStats {
 	fixture := readFullJSON[fullCustomFixture](t, path)
-	dialect, err := ParseDialect(fixture.Dialect)
+	dialect, dialectVersion, err := fullParseDialect(fixture.Dialect)
 	if err != nil {
 		t.Fatalf("%s: %v", path, err)
 	}
@@ -328,17 +338,17 @@ func runFullCustomFixture(t *testing.T, path, dialectName, category string) full
 		if test.Expected != nil {
 			want = *test.Expected
 		}
-		got, err := fullTranspile(test.SQL, dialect, dialect, want)
+		got, err := fullTranspile(test.SQL, dialect, dialect, want, dialectVersion)
 		stats.record(fmt.Sprintf("custom %s/%s identity:%d", dialectName, category, index), test.SQL, want, got, err)
 	}
 	for index, test := range fixture.Transpilation {
 		for targetName, want := range test.Write {
-			target, err := ParseDialect(targetName)
+			target, targetVersion, err := fullParseDialect(targetName)
 			if err != nil {
 				stats.record(fmt.Sprintf("custom %s/%s write %s:%d", dialectName, category, targetName, index), test.SQL, want, "", err)
 				continue
 			}
-			got, err := fullTranspile(test.SQL, dialect, target, want)
+			got, err := fullTranspile(test.SQL, dialect, target, want, targetVersion)
 			stats.record(fmt.Sprintf("custom %s/%s write %s:%d", dialectName, category, targetName, index), test.SQL, want, got, err)
 		}
 		for sourceName, sourceSQL := range test.Read {
@@ -365,6 +375,21 @@ func fullDialectOrGeneric(name *string) Dialect {
 	return dialect
 }
 
+func fullParseDialect(name string) (Dialect, string, error) {
+	version := ""
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if normalized == "spark2" {
+		version = "spark2"
+	} else if comma := strings.IndexByte(normalized, ','); comma >= 0 {
+		suffix := strings.TrimSpace(normalized[comma+1:])
+		if strings.HasPrefix(suffix, "version=") {
+			version = strings.TrimSpace(strings.TrimPrefix(suffix, "version="))
+		}
+	}
+	dialect, err := ParseDialect(name)
+	return dialect, version, err
+}
+
 func generateFullGeneric(sql string, pretty bool) (string, error) {
 	result, err := ParseStrict(sql, DialectGeneric)
 	if err != nil {
@@ -376,13 +401,27 @@ func generateFullGeneric(sql string, pretty bool) (string, error) {
 	return GenerateWithOptions(result.Statements[0].Node, GenerateOptions{Pretty: pretty})
 }
 
-func fullTranspile(sql string, from, to Dialect, expected string) (string, error) {
-	outputs, err := TranspileWithOptions(sql, from, to, TranspileOptions{Pretty: hasFormattingNewline(expected)})
+func fullTranspile(sql string, from, to Dialect, expected string, targetVersion ...string) (string, error) {
+	return fullTranspileWithOptions(sql, from, to, expected, TranspileOptions{Pretty: hasFormattingNewline(expected)}, targetVersion...)
+}
+
+func fullIdentityTranspile(sql string, from, to Dialect, expected string, identify bool, targetVersion ...string) (string, error) {
+	return fullTranspileWithOptions(sql, from, to, expected, TranspileOptions{Pretty: hasFormattingNewline(expected), Identify: identify}, targetVersion...)
+}
+
+func fullTranspileWithOptions(sql string, from, to Dialect, expected string, options TranspileOptions, targetVersion ...string) (string, error) {
+	if len(targetVersion) > 0 {
+		options.DialectVersion = targetVersion[0]
+	}
+	outputs, err := TranspileWithOptions(sql, from, to, options)
 	if err != nil {
 		return "", err
 	}
-	if len(outputs) != 1 {
-		return "", fmt.Errorf("expected one statement, got %d", len(outputs))
+	if len(outputs) == 0 {
+		return "", fmt.Errorf("expected one statement, got 0")
+	}
+	if len(outputs) > 1 {
+		return strings.Join(outputs, "; "), nil
 	}
 	return outputs[0], nil
 }

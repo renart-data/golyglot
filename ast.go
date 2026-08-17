@@ -86,8 +86,11 @@ type Statement struct {
 
 type SelectStmt struct {
 	nodeBase
-	RawQuery         string
-	With             []CTE
+	RawQuery string
+	With     []CTE
+	// WithTail preserves dialect-specific clauses between the CTE list and
+	// the main SELECT, such as PostgreSQL's CYCLE clause.
+	WithTail         string
 	Distinct         bool
 	DistinctOn       []Expr
 	SelectModifier   string
@@ -126,6 +129,7 @@ type SelectStmt struct {
 	SetRightParen    bool
 	ParenthesisDepth int
 	TailOutsideParen bool
+	commaUnnest      bool
 	// Tail preserves dialect-specific query clauses that the common grammar
 	// does not model yet. It keeps parsing lossless without pretending the
 	// clause has generic semantics.
@@ -183,9 +187,11 @@ func (*UpdateStmt) Kind() NodeKind { return NodeUpdateStatement }
 
 type DeleteStmt struct {
 	nodeBase
-	Table []Identifier
-	Where Expr
-	Tail  string
+	Table   []Identifier
+	Where   Expr
+	Tail    string
+	HasFrom bool
+	Alias   *Identifier
 }
 
 func (*DeleteStmt) Kind() NodeKind { return NodeDeleteStatement }
@@ -348,8 +354,11 @@ type TableFunctionFrom struct {
 	RawArgs        string
 	Alias          *Identifier
 	Columns        []Identifier
+	ColumnsRaw     string
 	WithOrdinality bool
 	WithOffset     bool
+	Lateral        bool
+	preserveAlias  bool
 }
 
 type TableSample struct {
@@ -549,7 +558,10 @@ func (*IntervalExpr) expressionNode() {}
 
 type CastExpr struct {
 	nodeBase
-	Keyword                string
+	Keyword string
+	// Operator preserves dialect-specific postfix cast syntax such as
+	// SingleStore's :> and !:>. It is empty for the usual CAST(...) form.
+	Operator               string
 	Value                  Expr
 	Type                   Expr
 	TypeSuffix             []Identifier

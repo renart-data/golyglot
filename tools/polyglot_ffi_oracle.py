@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Run the checked-in fixture corpus through a released Polyglot FFI.
+"""Compare the extended checked-in corpus with a released Polyglot FFI.
 
-This is a versioned behavior oracle, not a runtime dependency of golyglot.
-The Go package and its normal tests remain pure Go.  Set POLYGLOT_FFI_PATH to
-the shared library from a Polyglot GitHub release (or pass --library).
+This is an exact-output comparison for Polyglot's public transpile/format ABI,
+not a reproduction of the 11,333-case compatibility suite reported in the
+Polyglot README. The extended corpus also runs reverse ``read`` mappings,
+additional target mappings, and project-specific fixtures. Upstream dialect
+identity tests use a lower-level parse/transform/generate path with quoting and
+keyword-case overrides that the public FFI options do not expose.
+
+The comparison is not a runtime dependency of golyglot. The Go package and its
+normal tests remain pure Go. Set POLYGLOT_FFI_PATH to the shared library from a
+Polyglot GitHub release (or pass --library).
 """
 
 from __future__ import annotations
@@ -117,7 +124,7 @@ def decode_result(
         return None, f"invalid transpile JSON: {exc}"
     if not isinstance(outputs, list) or not outputs:
         return None, "Polyglot returned no statements"
-    return str(outputs[0]), None
+    return "; ".join(str(output) for output in outputs), None
 
 
 def has_formatting_newline(sql: str) -> bool:
@@ -377,7 +384,7 @@ def main() -> int:
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="return failure status when the released oracle differs from fixtures",
+        help="return failure status for any exact-output difference in the extended comparison",
     )
     args = parser.parse_args()
     library_path = Path(args.library).resolve()
@@ -386,14 +393,17 @@ def main() -> int:
 
     library = load_library(library_path)
     version = (library.polyglot_version() or b"unknown").decode("utf-8", errors="replace")
-    print(f"Polyglot FFI oracle {version}: {library_path}")
+    print(f"Polyglot FFI extended comparison {version}: {library_path}")
+    print(
+        "Scope note: this is not Polyglot's tagged 11,333-case Rust compatibility suite."
+    )
     total = run_root_fixtures(library, args.fixtures)
     for path in sorted((args.fixtures / "dialects").glob("*.json")):
         total.merge(run_dialect_fixtures(library, path))
     total.merge(run_custom_fixtures(library, args.custom_fixtures))
-    print(f"Polyglot FFI oracle corpus: {total.summary()}")
+    print(f"Polyglot FFI extended corpus: {total.summary()}")
     if total.failures:
-        print("First oracle differences:")
+        print("First exact-output differences:")
         print_failures(total)
     return 1 if args.strict and total.failed else 0
 

@@ -34,6 +34,12 @@ func (p *parser) parseStatements() []Statement {
 		var node Node
 		if p.options.Dialect == DialectDuckDB && ((tok.IsWord("WITH") && p.hasTopLevelDuckDBKeyword("PIVOT")) || (tok.Text == "(" && p.hasTopLevelDuckDBSetOperator())) {
 			node = p.parseRawStatement()
+		} else if p.options.Dialect == DialectTeradata && p.teradataRawStatementStart(tok) {
+			node = p.parseRawStatement()
+		} else if p.options.Dialect == DialectRedshift && tok.Kind == TokenNumber && p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].IsWord("DIV") {
+			node = p.parseRawStatement()
+		} else if p.options.Dialect == DialectTeradata && ((tok.IsWord("SELECT") || tok.IsWord("CAST")) && p.hasWordFromCurrent("FORMAT")) {
+			node = p.parseRawStatement()
 		} else if tok.IsWord("SELECT") || (tok.IsWord("VALUES") && p.isValuesQueryStart()) || (tok.IsWord("WITH") && !p.startsWithWithNonQuery()) {
 			node = p.parseSelect()
 		} else if tok.Text == "(" && (p.queryStartsAfterParen() || p.startsNestedQueryFrom()) {
@@ -55,6 +61,12 @@ func (p *parser) parseStatements() []Statement {
 			}
 		} else if tok.IsWord("SET") || tok.IsWord("USE") {
 			node = p.parseCommand()
+		} else if p.options.Dialect == DialectMySQL && (tok.IsWord("LOCK") || tok.IsWord("UNLOCK")) {
+			node = p.parseRawStatement()
+		} else if p.options.Dialect == DialectMySQL && (tok.IsWord("MATCH") || strings.HasPrefix(strings.ToUpper(tok.Text), "_UTF8") || strings.HasPrefix(strings.ToUpper(tok.Text), "_LATIN1")) {
+			node = p.parseRawStatement()
+		} else if p.options.Dialect == DialectSQLite && (tok.IsWord("REPLACE") || tok.IsWord("ATTACH") || tok.IsWord("DETACH")) {
+			node = p.parseRawStatement()
 		} else if tok.IsWord("USING") && p.options.Dialect == DialectAthena {
 			node = p.parseRawStatement()
 		} else if (tok.IsWord("PIVOT") || tok.IsWord("PIVOT_WIDER") || tok.IsWord("UNPIVOT")) && p.options.Dialect == DialectDuckDB {
@@ -75,15 +87,17 @@ func (p *parser) parseStatements() []Statement {
 		if end < start {
 			end = tok.Span.End
 		}
+		terminated := false
 		if p.peek().Text == ";" {
 			end = p.advance().Span.End
+			terminated = true
 		}
 		if node == nil {
 			node = &UnknownStmt{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Reason: "parser produced no statement"}
 		}
 		statements = append(statements, Statement{Node: node, Span: Span{Start: start, End: end}})
 
-		if p.peek().Kind != TokenEOF && p.peek().Text != ";" {
+		if !terminated && p.peek().Kind != TokenEOF && p.peek().Text != ";" {
 			p.report(Diagnostic{
 				Severity: SeverityError,
 				Code:     "PARSE_UNEXPECTED_TOKEN",
@@ -104,7 +118,7 @@ func (p *parser) parseRawStatement() Node {
 	end := start
 	consumed := 0
 	compoundDepth := 0
-	compound := p.options.Dialect == DialectTSQL && p.peek().IsWord("CREATE")
+	compound := p.options.Dialect == DialectTSQL && (p.peek().IsWord("CREATE") || p.peek().IsWord("IF"))
 	for p.peek().Kind != TokenEOF {
 		if p.peek().Text == ";" && (!compound || compoundDepth == 0) {
 			break
@@ -139,6 +153,42 @@ func (p *parser) parseRawStatement() Node {
 		})
 	}
 	return &RawStmt{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Keyword: strings.ToUpper(keyword), Raw: p.text[start:end]}
+}
+
+func (p *parser) teradataRawStatementStart(tok Token) bool {
+	return tok.IsWord("LOCKING") || tok.IsWord("COLLECT") || tok.IsWord("HELP") || tok.IsWord("REPLACE") || tok.IsWord("RENAME") || tok.IsWord("SEL") || tok.IsWord("UPD") || tok.IsWord("DEL") || tok.IsWord("INS")
+}
+
+func (p *parser) hasTopLevelWordFromCurrent(word string) bool {
+	depth := 0
+	for index := p.pos; index < len(p.tokens); index++ {
+		tok := p.tokens[index]
+		if tok.Kind == TokenComment {
+			continue
+		}
+		switch tok.Text {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 && tok.IsWord(word) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (p *parser) hasWordFromCurrent(word string) bool {
+	for index := p.pos; index < len(p.tokens); index++ {
+		if p.tokens[index].Kind != TokenComment && p.tokens[index].IsWord(word) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *parser) hasTopLevelDuckDBKeyword(word string) bool {
@@ -360,7 +410,15 @@ func (p *parser) parseCreateTable() Node {
 		p.expectWord("EXISTS", "after IF NOT in CREATE TABLE")
 		ifNotExists = true
 	}
-	name, ok := p.parseNameParts()
+	var name []Identifier
+	var ok bool
+	if p.options.Dialect == DialectDuckDB && (p.peek().Kind == TokenString || p.peek().Kind == TokenUnterminatedString) {
+		tok := p.advance()
+		name = []Identifier{{Text: strings.Trim(tok.Text, "'"), Quoted: true, Quote: '\''}}
+		ok = true
+	} else {
+		name, ok = p.parseNameParts()
+	}
 	if !ok {
 		p.reportExpectedIdentifier("after CREATE TABLE")
 	}
@@ -385,7 +443,11 @@ func (p *parser) parseInsert() Node {
 	}
 	var columns []Identifier
 	if p.matchText("(") {
-		columns = p.parseIdentifierList("INSERT columns")
+		if p.options.Dialect == DialectClickHouse {
+			columns = p.parseClickHouseInsertColumns()
+		} else {
+			columns = p.parseIdentifierList("INSERT columns")
+		}
 		p.expectText(")", "to close INSERT columns")
 	}
 	stmt := &InsertStmt{nodeBase: nodeBase{span: Span{Start: start, End: p.lastEnd}}, Table: table, Columns: columns}
@@ -407,6 +469,28 @@ func (p *parser) parseInsert() Node {
 	}
 	p.captureStatementTail(&stmt.nodeBase, &stmt.Tail)
 	return stmt
+}
+
+func (p *parser) parseClickHouseInsertColumns() []Identifier {
+	var columns []Identifier
+	for p.peek().Kind != TokenEOF && p.peek().Text != ")" {
+		start := p.peek().Span.Start
+		parts, ok := p.parseNameParts()
+		if !ok {
+			p.reportExpectedIdentifier("in ClickHouse INSERT columns")
+			break
+		}
+		text := make([]string, len(parts))
+		for index, part := range parts {
+			text[index] = part.Text
+		}
+		end := p.lastEnd
+		columns = append(columns, Identifier{Text: strings.Join(text, "."), Span: Span{Start: start, End: end}})
+		if !p.matchText(",") {
+			break
+		}
+	}
+	return columns
 }
 
 func (p *parser) parseUpdate() Node {
@@ -440,12 +524,16 @@ func (p *parser) parseUpdate() Node {
 
 func (p *parser) parseDelete() Node {
 	start := p.advance().Span.Start
-	p.expectWord("FROM", "after DELETE")
+	hasFrom := p.matchWord("FROM")
 	table, ok := p.parseNameParts()
 	if !ok {
-		p.reportExpectedIdentifier("after DELETE FROM")
+		p.reportExpectedIdentifier("after DELETE")
 	}
-	stmt := &DeleteStmt{nodeBase: nodeBase{span: Span{Start: start, End: p.lastEnd}}, Table: table}
+	var alias *Identifier
+	if !p.peek().IsWord("USING") && !p.peek().IsWord("WHERE") {
+		alias = p.parseOptionalAlias()
+	}
+	stmt := &DeleteStmt{nodeBase: nodeBase{span: Span{Start: start, End: p.lastEnd}}, Table: table, HasFrom: hasFrom, Alias: alias}
 	if p.matchWord("WHERE") {
 		stmt.Where = p.parseRequiredExpr("after DELETE WHERE")
 	}
@@ -538,7 +626,13 @@ func (p *parser) parseSelect() *SelectStmt {
 	stmt := &SelectStmt{}
 	p.recordNode()
 	if p.peek().IsWord("WITH") {
+		if p.options.Dialect == DialectClickHouse && p.clickHouseWithExpressionStart() {
+			return p.parseClickHouseRawWithQuery(start)
+		}
 		stmt.With = p.parseCTEs()
+		if p.options.Dialect == DialectPostgreSQL && p.peek().IsWord("CYCLE") {
+			stmt.WithTail = p.captureWithTailBeforeQuery()
+		}
 		if p.options.Dialect == DialectDuckDB && p.peek().IsWord("FROM") {
 			query := p.parseDuckDBFromFirstQuery()
 			query.With = stmt.With
@@ -564,6 +658,11 @@ func (p *parser) parseSelect() *SelectStmt {
 			stmt.DistinctOn = p.parseExpressionList("DISTINCT ON")
 			p.expectText(")", "to close DISTINCT ON")
 		}
+	} else if p.options.Dialect == DialectOracle && p.matchWord("UNIQUE") {
+		// Oracle's legacy SELECT UNIQUE spelling is the same projection
+		// modifier as DISTINCT. Keeping it structural avoids treating the
+		// first projection as a bare alias.
+		stmt.Distinct = true
 	} else {
 		// ALL is the default but accepting it keeps the parser's cursor in the
 		// right place for dialects that spell it explicitly.
@@ -580,7 +679,7 @@ func (p *parser) parseSelect() *SelectStmt {
 			p.reportExpectedWord("STRUCT or VALUE", "after AS in SELECT")
 		}
 	}
-	if p.options.Dialect == DialectTSQL && p.matchWord("TOP") {
+	if (p.options.Dialect == DialectTSQL || p.options.Dialect == DialectTeradata || p.options.Dialect == DialectSnowflake) && p.matchWord("TOP") {
 		if p.matchText("(") {
 			stmt.TopParenthesized = true
 			if p.isQueryStart() {
@@ -597,10 +696,22 @@ func (p *parser) parseSelect() *SelectStmt {
 			stmt.Top = p.parsePostfix(p.parsePrefix())
 		}
 	}
+	if p.options.Dialect == DialectTSQL && stmt.Top != nil && p.matchWord("PERCENT") {
+		if p.matchWord("WITH") {
+			p.matchWord("TIES")
+		}
+		if p.peek().Kind == TokenEOF || p.peek().Text == ";" || p.peek().Text == ")" {
+			stmt.RawQuery = strings.TrimSpace(p.text[start:p.lastEnd])
+			return stmt
+		}
+	}
 	stmt.Projections = p.parseSelectList()
 
 	if p.matchWord("INTO") {
-		if p.options.Dialect == DialectTSQL && p.matchWord("UNLOGGED") {
+		if p.matchWord("TEMPORARY") || p.matchWord("TEMP") {
+			stmt.IntoTemporary = true
+		}
+		if p.matchWord("UNLOGGED") {
 			stmt.IntoUnlogged = true
 		}
 		stmt.Into, _ = p.parseNameParts()
@@ -886,6 +997,9 @@ func (p *parser) matchSetOperator() (string, bool) {
 			return operator, true
 		}
 	}
+	if (p.options.Dialect == DialectExasol || p.options.Dialect == DialectRedshift || p.options.Dialect == DialectTeradata || p.options.Dialect == DialectSpark || p.options.Dialect == DialectDatabricks || p.options.Dialect == DialectSnowflake || p.options.Dialect == DialectOracle) && p.matchWord("MINUS") {
+		return "EXCEPT", true
+	}
 	return "", false
 }
 
@@ -951,7 +1065,7 @@ func (p *parser) parseCTEs() []CTE {
 		}
 		cteStart := name.Span.Start
 		var columns []Identifier
-		missingASQuery := p.options.Dialect == DialectSnowflake && p.peek().Text == "(" && p.peekTextAfter("SELECT")
+		missingASQuery := (p.options.Dialect == DialectSnowflake || p.options.Dialect == DialectDatabricks) && p.peek().Text == "(" && p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].IsWord("SELECT")
 		if p.matchText("(") && !missingASQuery {
 			columns = p.parseIdentifierList("CTE column list")
 			p.expectText(")", "to close the CTE column list")
@@ -1032,6 +1146,83 @@ func (p *parser) parseCTEs() []CTE {
 	return ctes
 }
 
+// captureWithTailBeforeQuery keeps a dialect-specific clause between a WITH
+// list and the main query lossless without making the common SELECT grammar
+// pretend to understand its semantics.
+func (p *parser) captureWithTailBeforeQuery() string {
+	start := p.peek().Span.Start
+	end := start
+	depth := 0
+	for p.peek().Kind != TokenEOF && p.peek().Text != ";" {
+		tok := p.peek()
+		if depth == 0 && tok.IsWord("SELECT") {
+			break
+		}
+		p.advance()
+		end = tok.Span.End
+		switch tok.Text {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return strings.TrimSpace(p.text[start:end])
+}
+
+// ClickHouse also permits a WITH expression without the SQL-standard CTE
+// shape.  These forms are useful in the editor and are intentionally kept as
+// a lossless query node until the AST has a dedicated representation for
+// ClickHouse's expression aliases.
+func (p *parser) clickHouseWithExpressionStart() bool {
+	index := p.pos + 1
+	for index < len(p.tokens) && p.tokens[index].Kind == TokenComment {
+		index++
+	}
+	if index >= len(p.tokens) {
+		return false
+	}
+	tok := p.tokens[index]
+	if tok.Kind == TokenString || tok.Kind == TokenUnterminatedString || tok.Text == "[" || tok.Text == "(" {
+		return true
+	}
+	if !p.isNameToken(tok) {
+		return false
+	}
+	index++
+	for index < len(p.tokens) && p.tokens[index].Kind == TokenComment {
+		index++
+	}
+	return index < len(p.tokens) && p.tokens[index].Text == "("
+}
+
+func (p *parser) parseClickHouseRawWithQuery(start int) *SelectStmt {
+	index := p.pos
+	depth := 0
+	end := start
+	for index < len(p.tokens) {
+		tok := p.tokens[index]
+		if tok.Kind == TokenEOF || tok.Text == ";" || (tok.Text == ")" && depth == 0) {
+			break
+		}
+		if tok.Text == "(" {
+			depth++
+		} else if tok.Text == ")" && depth > 0 {
+			depth--
+		}
+		end = tok.Span.End
+		index++
+	}
+	p.pos = index
+	p.lastEnd = end
+	return &SelectStmt{
+		nodeBase: nodeBase{span: Span{Start: start, End: end}},
+		RawQuery: strings.TrimSpace(p.text[start:end]),
+	}
+}
+
 func (p *parser) parseDuckDBRawQuery() *SelectStmt {
 	start := p.peek().Span.Start
 	index := p.pos
@@ -1079,7 +1270,12 @@ func (p *parser) parseValuesQuery() *SelectStmt {
 	p.recordNode()
 	for {
 		if p.matchText("(") {
-			row := p.parseExpressionList("VALUES row")
+			var row []Expr
+			if p.options.Dialect == DialectHive {
+				row = p.parseHiveValuesRow()
+			} else {
+				row = p.parseExpressionList("VALUES row")
+			}
 			p.expectText(")", "to close VALUES row")
 			stmt.ValuesRows = append(stmt.ValuesRows, row)
 		} else {
@@ -1120,6 +1316,36 @@ func (p *parser) parseValuesQuery() *SelectStmt {
 		}
 	}
 	return stmt
+}
+
+func (p *parser) parseHiveValuesRow() []Expr {
+	var expressions []Expr
+	for {
+		if p.isClauseBoundary() || p.peek().Text == ")" {
+			expressions = append(expressions, p.missingExpr("in VALUES row"))
+			break
+		}
+		expression := p.parseExpression(0)
+		if p.matchWord("AS") {
+			if alias, ok := p.parseIdentifier(false); ok {
+				expression = &AliasExpr{
+					nodeBase: nodeBase{span: Span{Start: expression.SourceSpan().Start, End: alias.Span.End}},
+					Expr:     expression,
+					Alias:    alias,
+				}
+			} else {
+				p.reportExpectedIdentifier("after AS in VALUES row")
+			}
+		}
+		expressions = append(expressions, expression)
+		if !p.matchText(",") {
+			break
+		}
+		if p.isClauseBoundary() || p.peek().Text == ")" {
+			break
+		}
+	}
+	return expressions
 }
 
 func (p *parser) parseSelectList() []SelectItem {
@@ -1187,6 +1413,10 @@ func (p *parser) parseSelectList() []SelectItem {
 			alias, _ := p.parseIdentifier(true)
 			item.Alias = &alias
 			item.Span.End = alias.Span.End
+		} else if p.isStringProjectionAlias() {
+			tok := p.advance()
+			item.Alias = &Identifier{Text: strings.Trim(tok.Text, "'\""), Quoted: true, Quote: '"', Span: tok.Span}
+			item.Span.End = tok.Span.End
 		} else if p.isTerminalProjectionAlias() {
 			alias, _ := p.parseIdentifier(true)
 			item.Alias = &alias
@@ -1335,12 +1565,33 @@ func (p *parser) parseTableExpr() *TableExpr {
 		if p.matchWord("ON") {
 			join.Condition = p.parseRequiredExpr("after JOIN ... ON")
 		} else if p.matchWord("USING") {
-			p.expectText("(", "after USING")
-			join.Using = p.parseUsingList()
-			p.expectText(")", "to close USING")
+			if p.matchText("(") {
+				join.Using = p.parseUsingList()
+				p.expectText(")", "to close USING")
+			} else if p.options.Dialect == DialectClickHouse {
+				join.Using = p.parseUsingList()
+			} else {
+				p.expectText("(", "after USING")
+			}
 		}
 		join.nodeBase.span = Span{Start: joinStart, End: p.lastEnd}
 		table.Joins = append(table.Joins, join)
+		if p.options.Dialect == DialectClickHouse && strings.Contains(strings.ToUpper(joinText), "ARRAY JOIN") {
+			for p.matchText(",") {
+				rightStart := p.peek().Span.Start
+				right := p.parseFromItem()
+				if right == nil {
+					p.reportExpectedTable("after ARRAY JOIN comma")
+					break
+				}
+				table.Joins = append(table.Joins, JoinClause{
+					nodeBase: nodeBase{span: Span{Start: rightStart, End: p.lastEnd}},
+					Kind:     kind,
+					JoinText: joinText,
+					Right:    right,
+				})
+			}
+		}
 	}
 	for p.peek().IsWord("ON") || p.peek().IsWord("USING") {
 		index := -1
@@ -1357,9 +1608,16 @@ func (p *parser) parseTableExpr() *TableExpr {
 			table.Joins[index].Condition = p.parseRequiredExpr("after JOIN ... ON")
 		} else {
 			p.advance() // USING
-			p.expectText("(", "after USING")
-			table.Joins[index].Using = p.parseUsingList()
-			p.expectText(")", "to close USING")
+			if p.matchText("(") {
+				table.Joins[index].Using = p.parseUsingList()
+				p.expectText(")", "to close USING")
+			} else if p.options.Dialect == DialectClickHouse {
+				// ClickHouse accepts the compact `USING id, name` form and
+				// canonicalizes it to a parenthesized list when generating SQL.
+				table.Joins[index].Using = p.parseUsingList()
+			} else {
+				p.expectText("(", "after USING")
+			}
 		}
 		table.Joins[index].Late = true
 		table.Joins[index].nodeBase.span.End = p.lastEnd
@@ -1379,12 +1637,33 @@ func (p *parser) parseTableExpr() *TableExpr {
 		if p.matchWord("ON") {
 			join.Condition = p.parseRequiredExpr("after JOIN ... ON")
 		} else if p.matchWord("USING") {
-			p.expectText("(", "after USING")
-			join.Using = p.parseIdentifierList("USING")
-			p.expectText(")", "to close USING")
+			if p.matchText("(") {
+				join.Using = p.parseIdentifierList("USING")
+				p.expectText(")", "to close USING")
+			} else if p.options.Dialect == DialectClickHouse {
+				join.Using = p.parseIdentifierList("USING")
+			} else {
+				p.expectText("(", "after USING")
+			}
 		}
 		join.nodeBase.span = Span{Start: joinStart, End: p.lastEnd}
 		table.Joins = append(table.Joins, join)
+		if p.options.Dialect == DialectClickHouse && strings.Contains(strings.ToUpper(joinText), "ARRAY JOIN") {
+			for p.matchText(",") {
+				rightStart := p.peek().Span.Start
+				right := p.parseFromItem()
+				if right == nil {
+					p.reportExpectedTable("after ARRAY JOIN comma")
+					break
+				}
+				table.Joins = append(table.Joins, JoinClause{
+					nodeBase: nodeBase{span: Span{Start: rightStart, End: p.lastEnd}},
+					Kind:     kind,
+					JoinText: joinText,
+					Right:    right,
+				})
+			}
+		}
 	}
 	for p.matchWord("LATERAL") {
 		p.expectWord("VIEW", "after LATERAL")
@@ -1471,6 +1750,17 @@ func (p *parser) parseNamedWindows() []NamedWindow {
 func (p *parser) parseWindowSpec() WindowSpec {
 	var spec WindowSpec
 	p.expectText("(", "before window specification")
+	if p.options.Dialect == DialectHive && p.peek().IsWord("DISTRIBUTE") {
+		p.advance()
+		p.expectWord("BY", "after DISTRIBUTE")
+		spec.PartitionBy = p.parseExpressionList("DISTRIBUTE BY")
+		if p.matchWord("SORT") {
+			p.expectWord("BY", "after SORT")
+			spec.OrderBy = p.parseOrderList()
+		}
+		p.expectText(")", "to close window specification")
+		return spec
+	}
 	if p.isNameToken(p.peek()) && !p.peek().IsWord("PARTITION") && !p.peek().IsWord("ORDER") && !p.peek().IsWord("ROWS") && !p.peek().IsWord("RANGE") && !p.peek().IsWord("GROUPS") {
 		if base, ok := p.parseIdentifier(true); ok {
 			spec.Base = &base
@@ -1558,6 +1848,19 @@ func (p *parser) parseFromItem() FromItem {
 			columns := p.parseFromAliasColumns()
 			return &SubqueryFrom{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(p.lastEnd, maxInt(aliasEnd(alias), identifierListEnd(columns)))}}, Query: query, Alias: alias, Columns: columns, Lateral: true}
 		}
+		if p.isNameToken(p.peek()) {
+			relation := p.parseFromItem()
+			if function, ok := relation.(*TableFunctionFrom); ok {
+				function.Lateral = true
+				function.nodeBase.span.Start = start
+				return function
+			}
+			if raw, ok := relation.(*RawFrom); ok {
+				raw.Raw = "LATERAL " + raw.Raw
+				raw.nodeBase.span.Start = start
+				return raw
+			}
+		}
 		p.reportExpectedQuery("after LATERAL")
 		return nil
 	}
@@ -1582,6 +1885,36 @@ func (p *parser) parseFromItem() FromItem {
 		sample := p.parseTableSample()
 		return &TableName{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(p.lastEnd, aliasEnd(alias))}}, Parts: []Identifier{part}, Alias: alias, Sample: sample}
 	}
+	if p.options.Dialect == DialectClickHouse && p.peek().Text == "[" {
+		expression := p.parsePrefix()
+		raw := strings.TrimSpace(p.text[start:p.lastEnd])
+		if raw == "" {
+			raw = renderExpr(expression)
+		}
+		alias := p.parseOptionalAlias()
+		columns := p.parseFromAliasColumns()
+		return &RawFrom{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(p.lastEnd, identifierListEnd(columns))}}, Raw: raw, Alias: alias, Columns: columns}
+	}
+	if p.peek().Text == "{" && (p.options.Dialect == DialectGeneric || p.options.Dialect == DialectClickHouse || p.options.Dialect == DialectSpark || p.options.Dialect == DialectDatabricks) {
+		depth := 0
+		end := start
+		for p.peek().Kind != TokenEOF {
+			tok := p.advance()
+			end = tok.Span.End
+			switch tok.Text {
+			case "{":
+				depth++
+			case "}":
+				depth--
+				if depth == 0 {
+					alias := p.parseOptionalAlias()
+					return &RawFrom{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(end, aliasEnd(alias))}}, Raw: p.text[start:end], Alias: alias}
+				}
+			}
+		}
+		p.reportExpectedTable("after FROM")
+		return nil
+	}
 	if p.matchText("(") {
 		if p.peek().IsWord("VALUES") {
 			depth := 1
@@ -1600,6 +1933,32 @@ func (p *parser) parseFromItem() FromItem {
 					Severity: SeverityError,
 					Code:     "PARSE_UNCLOSED_PAREN",
 					Message:  "unclosed VALUES FROM expression; expected )",
+					Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+					Found:    p.peek().Kind,
+					Recovery: RecoveryInserted,
+				})
+			}
+			alias := p.parseOptionalAlias()
+			columns := p.parseFromAliasColumns()
+			return &RawFrom{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(end, maxInt(aliasEnd(alias), identifierListEnd(columns)))}}, Raw: p.text[start:end], Alias: alias, Columns: columns}
+		}
+		if p.options.Dialect == DialectTSQL && p.peek().IsWord("MERGE") {
+			depth := 1
+			end := p.lastEnd
+			for depth > 0 && p.peek().Kind != TokenEOF {
+				tok := p.advance()
+				end = tok.Span.End
+				if tok.Text == "(" {
+					depth++
+				} else if tok.Text == ")" {
+					depth--
+				}
+			}
+			if depth > 0 {
+				p.report(Diagnostic{
+					Severity: SeverityError,
+					Code:     "PARSE_UNCLOSED_PAREN",
+					Message:  "unclosed MERGE FROM expression; expected )",
 					Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
 					Found:    p.peek().Kind,
 					Recovery: RecoveryInserted,
@@ -1736,11 +2095,23 @@ func (p *parser) parseFromItem() FromItem {
 			columns := p.parseFromAliasColumns()
 			return &TableFunctionFrom{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(end, maxInt(aliasEnd(alias), identifierListEnd(columns)))}}, Name: parts, RawArgs: rawArgs, Alias: alias, Columns: columns}
 		}
-		if p.options.Dialect == DialectBigQuery && p.requiresRawFunctionArguments() {
+		if p.options.Dialect == DialectSnowflake && len(parts) == 1 && strings.EqualFold(parts[0].Text, "FLATTEN") {
+			rawArgs, end := p.captureBalancedFunctionArguments()
+			alias := p.parseOptionalAlias()
+			columns, columnsRaw := p.parseFromAliasColumnsWithRaw()
+			return &TableFunctionFrom{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(end, maxInt(aliasEnd(alias), identifierListEnd(columns)))}}, Name: parts, RawArgs: rawArgs, Alias: alias, Columns: columns, ColumnsRaw: columnsRaw}
+		}
+		if (p.options.Dialect == DialectBigQuery && p.requiresRawFunctionArguments()) || (p.options.Dialect == DialectMySQL && len(parts) == 1 && strings.EqualFold(parts[0].Text, "JSON_TABLE")) {
 			rawArgs, end := p.captureBalancedFunctionArguments()
 			alias := p.parseOptionalAlias()
 			columns := p.parseFromAliasColumns()
 			return &TableFunctionFrom{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(end, maxInt(aliasEnd(alias), identifierListEnd(columns)))}}, Name: parts, RawArgs: rawArgs, Alias: alias, Columns: columns}
+		}
+		if (p.options.Dialect == DialectPostgreSQL || p.options.Dialect == DialectOracle) && len(parts) == 1 && (strings.EqualFold(parts[0].Text, "XMLTABLE") || (p.options.Dialect == DialectOracle && strings.EqualFold(parts[0].Text, "JSON_TABLE"))) {
+			rawArgs, end := p.captureBalancedFunctionArguments()
+			alias := p.parseOptionalAlias()
+			columns, columnsRaw := p.parseFromAliasColumnsWithRaw()
+			return &TableFunctionFrom{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(end, maxInt(aliasEnd(alias), identifierListEnd(columns)))}}, Name: parts, RawArgs: rawArgs, Alias: alias, Columns: columns, ColumnsRaw: columnsRaw}
 		}
 		args := p.parseCallArguments()
 		if len(parts) == 1 && strings.EqualFold(parts[0].Text, "UNNEST") && len(args) == 0 {
@@ -1751,6 +2122,17 @@ func (p *parser) parseFromItem() FromItem {
 				Span:     Span{Start: start, End: p.lastEnd},
 				Recovery: RecoveryNone,
 			})
+		}
+		if p.options.Dialect == DialectTSQL && p.matchWord("WITH") && p.peek().Text == "(" {
+			p.advance()
+			_, end := p.captureBalancedFunctionArguments()
+			callText := p.text[parts[0].Span.Start:end]
+			if open := strings.IndexByte(callText, '('); open >= 0 {
+				rawArgs := callText[open:]
+				alias := p.parseOptionalAlias()
+				columns := p.parseFromAliasColumns()
+				return &TableFunctionFrom{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(end, maxInt(aliasEnd(alias), identifierListEnd(columns)))}}, Name: parts, RawArgs: rawArgs, Alias: alias, Columns: columns}
+			}
 		}
 		withOrdinality := false
 		withOffset := false
@@ -1764,12 +2146,15 @@ func (p *parser) parseFromItem() FromItem {
 			}
 		}
 		alias := p.parseOptionalAlias()
-		columns := p.parseFromAliasColumns()
-		return &TableFunctionFrom{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(p.lastEnd, maxInt(aliasEnd(alias), identifierListEnd(columns)))}}, Name: parts, Args: args, Alias: alias, Columns: columns, WithOrdinality: withOrdinality, WithOffset: withOffset}
+		columns, columnsRaw := p.parseFromAliasColumnsWithRaw()
+		return &TableFunctionFrom{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(p.lastEnd, maxInt(aliasEnd(alias), identifierListEnd(columns)))}}, Name: parts, Args: args, Alias: alias, Columns: columns, ColumnsRaw: columnsRaw, WithOrdinality: withOrdinality, WithOffset: withOffset}
 	}
 	var tail string
 	if p.options.Dialect == DialectSnowflake && (p.peek().IsWord("CHANGES") || p.peek().IsWord("BEFORE") || p.peek().IsWord("AT")) {
 		tail = p.captureSnowflakeFromTail()
+	}
+	if (p.options.Dialect == DialectHive || p.options.Dialect == DialectSpark || p.options.Dialect == DialectTrino) && p.isTimeTravelTableTailStart() {
+		tail = p.captureTimeTravelTableTail()
 	}
 	var hint string
 	if p.options.Dialect == DialectTSQL && p.peek().IsWord("WITH") && p.peekTextAfter("(") {
@@ -1790,9 +2175,36 @@ func (p *parser) parseFromItem() FromItem {
 		}
 	}
 	alias := p.parseOptionalAlias()
+	if p.options.Dialect == DialectMySQL && tail == "" && p.isMySQLTableTailStart() {
+		tail = p.captureMySQLTableTail()
+	}
 	columns := p.parseFromAliasColumns()
 	sample := p.parseTableSample()
 	return &TableName{nodeBase: nodeBase{span: Span{Start: start, End: maxInt(p.lastEnd, maxInt(aliasEnd(alias), identifierListEnd(columns)))}}, Parts: parts, Alias: alias, Columns: columns, Sample: sample, Hint: hint, Tail: tail}
+}
+
+func (p *parser) isMySQLTableTailStart() bool {
+	return p.peek().IsWord("USE") || p.peek().IsWord("FORCE") || p.peek().IsWord("IGNORE") || p.peek().IsWord("PARTITION")
+}
+
+func (p *parser) captureMySQLTableTail() string {
+	start := p.peek().Span.Start
+	depth := 0
+	end := start
+	for p.peek().Kind != TokenEOF && p.peek().Text != ";" {
+		tok := p.peek()
+		if depth == 0 && (tok.IsWord("WHERE") || tok.IsWord("GROUP") || tok.IsWord("HAVING") || tok.IsWord("ORDER") || tok.IsWord("LIMIT") || tok.IsWord("QUALIFY") || tok.IsWord("JOIN") || tok.IsWord("INNER") || tok.IsWord("LEFT") || tok.IsWord("RIGHT") || tok.IsWord("FULL") || tok.IsWord("CROSS")) {
+			break
+		}
+		tok = p.advance()
+		end = tok.Span.End
+		if tok.Text == "(" {
+			depth++
+		} else if tok.Text == ")" && depth > 0 {
+			depth--
+		}
+	}
+	return strings.TrimSpace(p.text[start:end])
 }
 
 func (p *parser) captureSnowflakeFromTail() string {
@@ -1813,6 +2225,55 @@ func (p *parser) captureSnowflakeFromTail() string {
 		}
 	}
 	return strings.TrimSpace(p.text[start:end])
+}
+
+func (p *parser) isTimeTravelTableTailStart() bool {
+	return p.peekWords("VERSION", "AS", "OF") ||
+		p.peekWords("TIMESTAMP", "AS", "OF") ||
+		(p.options.Dialect == DialectTrino && p.peekWords("FOR", "VERSION", "AS", "OF"))
+}
+
+func (p *parser) captureTimeTravelTableTail() string {
+	start := p.peek().Span.Start
+	depth := 0
+	end := start
+	for p.peek().Kind != TokenEOF && p.peek().Text != ";" {
+		tok := p.peek()
+		if depth == 0 && (tok.IsWord("WHERE") || tok.IsWord("GROUP") || tok.IsWord("HAVING") || tok.IsWord("ORDER") || tok.IsWord("LIMIT") || tok.IsWord("QUALIFY") || tok.IsWord("JOIN") || tok.IsWord("INNER") || tok.IsWord("LEFT") || tok.IsWord("RIGHT") || tok.IsWord("FULL") || tok.IsWord("CROSS") || tok.IsWord("UNION") || tok.IsWord("INTERSECT") || tok.IsWord("EXCEPT")) {
+			break
+		}
+		tok = p.advance()
+		end = tok.Span.End
+		if tok.Text == "(" {
+			depth++
+		} else if tok.Text == ")" && depth > 0 {
+			depth--
+		}
+	}
+	return strings.TrimSpace(p.text[start:end])
+}
+
+func (p *parser) isHiveQueryTailStart() bool {
+	return p.peek().IsWord("DISTRIBUTE") || p.peek().IsWord("CLUSTER") || p.peek().IsWord("SORT")
+}
+
+func (p *parser) captureHiveQueryTail() string {
+	start := p.peek().Span.Start
+	end := start
+	depth := 0
+	for p.peek().Kind != TokenEOF && p.peek().Text != ";" {
+		tok := p.advance()
+		end = tok.Span.End
+		switch tok.Text {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return strings.Join(strings.Fields(p.text[start:end]), " ")
 }
 
 func (p *parser) startsSnowflakeStageFrom() bool {
@@ -2010,6 +2471,13 @@ func (p *parser) parseTableSample() *TableSample {
 
 func (p *parser) parseOptionalAlias() *Identifier {
 	if p.matchWord("AS") {
+		// Table functions and derived relations may use `AS (col)` without a
+		// relation alias. Leave the opening parenthesis for
+		// parseFromAliasColumns so this valid shape does not produce a spurious
+		// diagnostic.
+		if p.peek().Text == "(" {
+			return nil
+		}
 		if alias, ok := p.parseIdentifier(true); ok {
 			return &alias
 		}
@@ -2056,6 +2524,54 @@ func (p *parser) parseFromAliasColumns() []Identifier {
 	columns := p.parseIdentifierList("FROM alias columns")
 	p.expectText(")", "to close FROM alias columns")
 	return columns
+}
+
+// parseFromAliasColumnsWithRaw keeps typed relation-column declarations such
+// as AS t("rank" INT) intact. The structural names remain available to
+// analysis while the raw suffix prevents identity generation from dropping
+// PostgreSQL/XMLTABLE type information.
+func (p *parser) parseFromAliasColumnsWithRaw() ([]Identifier, string) {
+	if !p.matchText("(") {
+		return nil, ""
+	}
+	start := p.tokens[p.pos-1].Span.Start
+	var columns []Identifier
+	typed := false
+	for p.peek().Kind != TokenEOF && p.peek().Text != ")" {
+		identifier, ok := p.parseIdentifier(false)
+		if !ok {
+			p.reportExpectedIdentifier("in FROM alias columns")
+			break
+		}
+		columns = append(columns, identifier)
+		depth := 0
+		for p.peek().Kind != TokenEOF {
+			tok := p.peek()
+			if depth == 0 && (tok.Text == "," || tok.Text == ")") {
+				break
+			}
+			typed = true
+			p.advance()
+			switch tok.Text {
+			case "(", "[", "{":
+				depth++
+			case ")", "]", "}":
+				if depth > 0 {
+					depth--
+				}
+			}
+		}
+		if !p.matchText(",") {
+			break
+		}
+	}
+	end := p.lastEnd
+	p.expectText(")", "to close FROM alias columns")
+	if !typed {
+		return columns, ""
+	}
+	end = p.lastEnd
+	return columns, p.text[start:end]
 }
 
 func identifierListEnd(identifiers []Identifier) int {
@@ -2146,15 +2662,60 @@ func (p *parser) parseExpression(minPrecedence int) Expr {
 	left := p.parsePrefix()
 	left = p.parsePostfix(left)
 	for {
-		if p.peek().Text == "::" {
+		if p.options.Dialect == DialectPostgreSQL {
+			if first, ok := left.(*LiteralExpr); ok && first.KindValue == LiteralString && p.peek().Kind == TokenString {
+				args := []Expr{first}
+				for p.peek().Kind == TokenString {
+					args = append(args, p.parsePrefix())
+				}
+				left = &FunctionCallExpr{nodeBase: nodeBase{span: Span{Start: first.SourceSpan().Start, End: args[len(args)-1].SourceSpan().End}}, Name: []Identifier{{Text: "CONCAT"}}, Args: args}
+				p.recordNode()
+				continue
+			}
+		}
+		if p.options.Dialect == DialectClickHouse && minPrecedence == 0 && p.peek().Text == "?" {
+			start := left.SourceSpan().Start
+			p.advance()
+			thenExpr := p.parseRequiredExpr("after ? in ternary expression")
+			p.expectText(":", "after ? expression")
+			elseExpr := p.parseRequiredExpr("after : in ternary expression")
+			left = &CaseExpr{
+				nodeBase: nodeBase{span: Span{Start: start, End: elseExpr.SourceSpan().End}},
+				Whens:    []CaseWhen{{Condition: left, Result: thenExpr}},
+				Else:     elseExpr,
+			}
+			p.recordNode()
+			left = p.parsePostfix(left)
+			continue
+		}
+		// `?` is ternary syntax in ClickHouse. The shared infix table also
+		// contains it for PostgreSQL JSON operators, so do not let a nested
+		// higher-precedence parse consume it first.
+		if p.options.Dialect == DialectClickHouse && p.peek().Text == "?" && minPrecedence > 0 {
+			break
+		}
+		if p.peek().Text == "::" || (p.options.Dialect == DialectSingleStore && (p.peek().Text == ":>" || p.peek().Text == "!:>")) {
 			if minPrecedence > 7 {
 				break
 			}
-			p.advance()
-			typeExpr, suffix := p.parseCastType()
+			operator := p.advance().Text
+			var typeExpr Expr
+			var suffix []Identifier
+			if p.options.Dialect == DialectSingleStore && operator != "::" {
+				typeExpr, suffix = p.parseSingleStoreCastType()
+			} else if p.options.Dialect == DialectSingleStore {
+				typeExpr, suffix = p.parseSingleStoreCastType()
+			} else {
+				typeExpr, suffix = p.parseCastType()
+			}
+			castOperator := ""
+			if operator != "::" {
+				castOperator = operator
+			}
 			left = &CastExpr{
 				nodeBase:   nodeBase{span: Span{Start: left.SourceSpan().Start, End: maxInt(p.lastEnd, typeExpr.SourceSpan().End)}},
 				Keyword:    "CAST",
+				Operator:   castOperator,
 				Value:      left,
 				Type:       typeExpr,
 				TypeSuffix: suffix,
@@ -2162,7 +2723,35 @@ func (p *parser) parseExpression(minPrecedence int) Expr {
 			p.recordNode()
 			continue
 		}
-		if p.peek().IsWord("NOT") && (p.peekWordAfter("NOT", "IN") || p.peekWordAfter("NOT", "BETWEEN") || p.peekWordAfter("NOT", "LIKE") || p.peekWordAfter("NOT", "ILIKE")) {
+		if p.options.Dialect == DialectDatabricks && p.peek().Text == "?" && p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].Text == "::" {
+			p.advance()
+			p.advance()
+			typeExpr, suffix := p.parseCastType()
+			left = &CastExpr{
+				nodeBase:   nodeBase{span: Span{Start: left.SourceSpan().Start, End: maxInt(p.lastEnd, typeExpr.SourceSpan().End)}},
+				Keyword:    "TRY_CAST",
+				Value:      left,
+				Type:       typeExpr,
+				TypeSuffix: suffix,
+			}
+			p.recordNode()
+			continue
+		}
+		if p.options.Dialect == DialectTeradata && ((p.peek().IsWord("NOT") && p.peekTextAfter("=")) || (p.peek().Text == "^" && p.peekTextAfter("="))) {
+			if minPrecedence > 3 {
+				break
+			}
+			p.advance()
+			p.advance()
+			right := p.parseExpression(4)
+			left = &BinaryExpr{
+				nodeBase: nodeBase{span: Span{Start: left.SourceSpan().Start, End: right.SourceSpan().End}},
+				Left:     left, Operator: "<>", Right: right,
+			}
+			p.recordNode()
+			continue
+		}
+		if p.peek().IsWord("NOT") && (p.peekWordAfter("NOT", "IN") || p.peekWordAfter("NOT", "BETWEEN") || p.peekWordAfter("NOT", "LIKE") || p.peekWordAfter("NOT", "ILIKE") || p.peekWordAfter("NOT", "RLIKE") || p.peekWordAfter("NOT", "REGEXP") || p.peekWordAfter("NOT", "SIMILAR")) {
 			if minPrecedence > 3 {
 				break
 			}
@@ -2175,8 +2764,18 @@ func (p *parser) parseExpression(minPrecedence int) Expr {
 				notOperator := "LIKE"
 				if p.peek().IsWord("ILIKE") {
 					notOperator = "ILIKE"
+				} else if p.peek().IsWord("RLIKE") {
+					notOperator = "RLIKE"
+				} else if p.peek().IsWord("REGEXP") {
+					notOperator = "REGEXP"
+				} else if p.peek().IsWord("SIMILAR") {
+					notOperator = "SIMILAR"
 				}
 				p.advance()
+				if notOperator == "SIMILAR" {
+					p.matchWord("TO")
+					notOperator = "SIMILAR TO"
+				}
 				right := p.parseExpression(4)
 				binary := &BinaryExpr{nodeBase: nodeBase{span: Span{Start: left.SourceSpan().Start, End: right.SourceSpan().End}}, Left: left, Operator: "NOT " + notOperator, Right: right}
 				p.parseLikeEscape(binary)
@@ -2196,6 +2795,21 @@ func (p *parser) parseExpression(minPrecedence int) Expr {
 				break
 			}
 			left = p.parseIn(left, false)
+			continue
+		}
+		if p.options.Dialect == DialectPostgreSQL && (p.peek().IsWord("ISNULL") || p.peek().IsWord("NOTNULL")) {
+			if minPrecedence > 3 {
+				break
+			}
+			not := p.peek().IsWord("NOTNULL")
+			p.advance()
+			left = &IsExpr{
+				nodeBase: nodeBase{span: Span{Start: left.SourceSpan().Start, End: p.lastEnd}},
+				Value:    left,
+				Operator: map[bool]string{true: "IS NOT", false: "IS"}[not],
+				Right:    &LiteralExpr{nodeBase: nodeBase{span: Span{Start: p.lastEnd, End: p.lastEnd}}, KindValue: LiteralNull, Raw: "NULL"},
+			}
+			p.recordNode()
 			continue
 		}
 		if p.peek().IsWord("IS") && !p.isBareAliasContinuation() {
@@ -2236,13 +2850,40 @@ func (p *parser) parseExpression(minPrecedence int) Expr {
 			precedence, operator, ok = 3, p.parseOperatorName(), true
 			operator = p.consumeOperatorComments(operator)
 		} else {
-			precedence, operator, ok = infixOperator(p.peek())
+			if p.options.Dialect == DialectTeradata {
+				switch strings.ToUpper(p.peek().Text) {
+				case "LT":
+					precedence, operator, ok = 3, "<", true
+				case "LE":
+					precedence, operator, ok = 3, "<=", true
+				case "GT":
+					precedence, operator, ok = 3, ">", true
+				case "GE":
+					precedence, operator, ok = 3, ">=", true
+				case "NE":
+					precedence, operator, ok = 3, "<>", true
+				case "EQ":
+					precedence, operator, ok = 3, "=", true
+				}
+			}
+			if p.options.Dialect == DialectMySQL && p.peek().IsWord("MOD") {
+				precedence, operator, ok = 6, "%", true
+			} else if !ok {
+				precedence, operator, ok = infixOperator(p.peek())
+			}
+			if p.options.Dialect == DialectExasol && p.peek().IsWord("REGEXP_LIKE") {
+				precedence, operator, ok = 3, "REGEXP_LIKE", true
+			}
 		}
 		if !ok || precedence < minPrecedence {
 			break
 		}
 		if !strings.HasPrefix(operator, "OPERATOR(") {
 			p.advance()
+		}
+		if strings.EqualFold(operator, "SIMILAR") {
+			p.matchWord("TO")
+			operator = "SIMILAR TO"
 		}
 		if (strings.EqualFold(operator, "LIKE") || strings.EqualFold(operator, "ILIKE") || strings.EqualFold(operator, "GLOB")) && p.matchWord("ANY") {
 			operator += " ANY"
@@ -2261,7 +2902,7 @@ func (p *parser) parseExpression(minPrecedence int) Expr {
 			Operator: operator,
 			Right:    right,
 		}
-		if strings.EqualFold(operator, "LIKE") || strings.EqualFold(operator, "ILIKE") || strings.EqualFold(operator, "GLOB") {
+		if strings.EqualFold(operator, "LIKE") || strings.EqualFold(operator, "ILIKE") || strings.EqualFold(operator, "GLOB") || strings.EqualFold(operator, "LIKE ANY") || strings.EqualFold(operator, "ILIKE ANY") || strings.EqualFold(operator, "GLOB ANY") || strings.EqualFold(operator, "SIMILAR TO") {
 			p.parseLikeEscape(binary)
 		}
 		p.recordNode()
@@ -2344,12 +2985,31 @@ func (p *parser) parseLikeEscape(expression *BinaryExpr) {
 	if !p.matchWord("ESCAPE") {
 		return
 	}
-	expression.Escape = p.parseRequiredExpr("after ESCAPE")
+	// ESCAPE takes one scalar expression. Parsing it with the normal
+	// expression entry point would consume a following WHERE predicate as
+	// part of the escape value, e.g. `LIKE 'x' ESCAPE '#' AND flag`.
+	// Prefix/postfix parsing preserves the following boolean operator for the
+	// surrounding expression while still accepting identifiers and calls.
+	if p.isExpressionBoundary() {
+		expression.Escape = p.missingExpr("after ESCAPE")
+	} else {
+		expression.Escape = p.parsePrefix()
+		expression.Escape = p.parsePostfix(expression.Escape)
+	}
 	expression.nodeBase.span.End = expression.Escape.SourceSpan().End
 }
 
 func (p *parser) parsePostfix(left Expr) Expr {
 	for {
+		if (p.options.Dialect == DialectOracle || p.options.Dialect == DialectRedshift) && p.peek().Text == "(" && p.pos+2 < len(p.tokens) && p.tokens[p.pos+1].Text == "+" && p.tokens[p.pos+2].Text == ")" {
+			start := left.SourceSpan().Start
+			p.advance()
+			p.advance()
+			p.advance()
+			end := p.lastEnd
+			left = &RawExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Raw: strings.TrimSpace(p.text[start:end])}
+			continue
+		}
 		if p.options.Dialect == DialectSnowflake && p.matchText("!") {
 			start := left.SourceSpan().Start
 			end := p.lastEnd
@@ -2362,7 +3022,7 @@ func (p *parser) parsePostfix(left Expr) Expr {
 			left = &RawExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Raw: p.text[start:end]}
 			continue
 		}
-		if p.options.Dialect == DialectSnowflake && p.hasSnowflakePathPrefix() {
+		if (p.options.Dialect == DialectSnowflake || p.options.Dialect == DialectDatabricks) && p.hasSnowflakePathPrefix() {
 			path, ok := p.parseSnowflakePath()
 			if ok {
 				left = &FunctionCallExpr{
@@ -2405,6 +3065,13 @@ func (p *parser) parsePostfix(left Expr) Expr {
 				})
 			}
 			left = &GenericExpr{nodeBase: nodeBase{span: Span{Start: start, End: p.lastEnd}}, Target: left, Arguments: arguments}
+			p.recordNode()
+			continue
+		}
+		if p.options.Dialect == DialectMaterialize && p.peek().Text == "[" {
+			start := left.SourceSpan().Start
+			end := p.captureMaterializeBracketSuffix()
+			left = &RawExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Raw: strings.TrimSpace(p.text[start:end])}
 			p.recordNode()
 			continue
 		}
@@ -2464,6 +3131,33 @@ func (p *parser) parsePostfix(left Expr) Expr {
 			continue
 		}
 		if p.matchText(".") {
+			if p.options.Dialect == DialectClickHouse && p.peek().Text == ":" && p.pos+1 < len(p.tokens) {
+				next := p.tokens[p.pos+1]
+				if next.Kind == TokenQuotedIdentifier || next.Kind == TokenString || next.Kind == TokenUnterminatedString {
+					colon := p.advance()
+					value := p.advance()
+					field := Identifier{
+						Text: ":" + value.Text,
+						Span: Span{Start: colon.Span.Start, End: value.Span.End},
+					}
+					left = &FieldExpr{nodeBase: nodeBase{span: Span{Start: left.SourceSpan().Start, End: value.Span.End}}, Target: left, Field: field}
+					p.recordNode()
+					continue
+				}
+			}
+			if p.options.Dialect == DialectClickHouse && p.matchText("^") {
+				field, ok := p.parseIdentifier(true)
+				if ok {
+					field.Quoted = false
+					field.Quote = 0
+					field.Text = "^" + field.Text
+					left = &FieldExpr{nodeBase: nodeBase{span: Span{Start: left.SourceSpan().Start, End: field.Span.End}}, Target: left, Field: field}
+					p.recordNode()
+					continue
+				}
+				p.reportExpectedIdentifier("after .^")
+				return left
+			}
 			field, ok := p.parseIdentifier(true)
 			if !ok && p.peek().Kind == TokenNumber {
 				tok := p.advance()
@@ -2496,6 +3190,14 @@ func (p *parser) parsePostfix(left Expr) Expr {
 			continue
 		}
 		if p.matchText("(") {
+			if p.options.Dialect == DialectOracle && p.peek().Text == "+" && p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].Text == ")" {
+				start := left.SourceSpan().Start
+				p.advance()
+				p.advance()
+				end := p.lastEnd
+				left = &RawExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Raw: strings.TrimSpace(p.text[start:end])}
+				continue
+			}
 			args := p.parseCallArguments()
 			left = &CallExpr{
 				nodeBase: nodeBase{span: Span{Start: left.SourceSpan().Start, End: p.lastEnd}},
@@ -2513,7 +3215,7 @@ func (p *parser) hasSnowflakePathPrefix() bool {
 	if p.peek().Kind == TokenParameter && strings.HasPrefix(p.peek().Text, ":") {
 		return true
 	}
-	return p.peek().Text == ":" && p.pos+1 < len(p.tokens) && p.isNameToken(p.tokens[p.pos+1])
+	return p.peek().Text == ":" && p.pos+1 < len(p.tokens) && (p.isNameToken(p.tokens[p.pos+1]) || p.tokens[p.pos+1].Text == "[")
 }
 
 func (p *parser) parseSnowflakePath() (string, bool) {
@@ -2529,15 +3231,44 @@ func (p *parser) parseSnowflakePath() (string, bool) {
 		path.WriteString(segment)
 		return true
 	}
+	appendIdentifier := func(identifier Identifier) bool {
+		if !identifier.Quoted {
+			return appendSegment(identifier.Text)
+		}
+		content := strings.ReplaceAll(identifier.Text, `"`, `\"`)
+		path.WriteString(`["`)
+		path.WriteString(content)
+		path.WriteString(`"]`)
+		return true
+	}
 
 	if p.peek().Kind == TokenParameter && strings.HasPrefix(p.peek().Text, ":") {
 		if !appendSegment(strings.TrimPrefix(p.advance().Text, ":")) {
 			return "", false
 		}
 	} else if p.matchText(":") {
-		segment, ok := p.parseIdentifier(true)
-		if !ok || !appendSegment(segment.Text) {
-			return "", false
+		if p.peek().Text == "[" {
+			open := p.advance()
+			depth := 1
+			end := open.Span.End
+			for p.peek().Kind != TokenEOF && depth > 0 {
+				tok := p.advance()
+				end = tok.Span.End
+				if tok.Text == "[" {
+					depth++
+				} else if tok.Text == "]" {
+					depth--
+				}
+			}
+			if depth > 0 {
+				p.report(Diagnostic{Severity: SeverityError, Code: "PARSE_UNCLOSED_BRACKET", Message: "unclosed JSON path index; expected ]", Span: Span{Start: end, End: end}, Found: p.peek().Kind, Recovery: RecoveryInserted})
+			}
+			path.WriteString(p.text[open.Span.Start:end])
+		} else {
+			segment, ok := p.parseIdentifier(true)
+			if !ok || !appendIdentifier(segment) {
+				return "", false
+			}
 		}
 	} else {
 		return "", false
@@ -2581,8 +3312,14 @@ func (p *parser) parseSnowflakePath() (string, bool) {
 			if !ok {
 				return path.String(), true
 			}
-			path.WriteByte('.')
-			path.WriteString(segment.Text)
+			if segment.Quoted {
+				if !appendIdentifier(segment) {
+					return path.String(), true
+				}
+			} else {
+				path.WriteByte('.')
+				path.WriteString(segment.Text)
+			}
 			continue
 		}
 		if p.peek().Kind == TokenParameter && strings.HasPrefix(p.peek().Text, ":") {
@@ -2593,7 +3330,7 @@ func (p *parser) parseSnowflakePath() (string, bool) {
 		}
 		if p.matchText(":") {
 			segment, ok := p.parseIdentifier(true)
-			if !ok || !appendSegment(segment.Text) {
+			if !ok || !appendIdentifier(segment) {
 				return path.String(), true
 			}
 			continue
@@ -2734,7 +3471,11 @@ func (p *parser) parseIn(left Expr, not bool) Expr {
 			p.parseIdentifier(true)
 		}
 		end := p.lastEnd
-		return &BinaryExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Left: left, Operator: "IN", Right: &RawExpr{nodeBase: nodeBase{span: Span{Start: bodyStart, End: end}}, Raw: strings.TrimSpace(p.text[bodyStart:end])}}
+		operator := "IN"
+		if not {
+			operator = "NOT IN"
+		}
+		return &BinaryExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Left: left, Operator: operator, Right: &RawExpr{nodeBase: nodeBase{span: Span{Start: bodyStart, End: end}}, Raw: strings.TrimSpace(p.text[bodyStart:end])}}
 	}
 	if p.isExpressionBoundary() {
 		// Keep an incomplete IN expression structurally useful for editor
@@ -2890,6 +3631,10 @@ func (p *parser) parseParenthesizedSetQuery() *SelectStmt {
 	if p.parseTrailingQueryClauses(left) {
 		left.TailOutsideParen = true
 	}
+	if p.options.Dialect == DialectHive && p.isHiveQueryTailStart() {
+		left.Tail = p.captureHiveQueryTail()
+		left.TailOutsideParen = true
+	}
 	if !setOperation {
 		left.Parenthesized = true
 		left.ParenthesisDepth++
@@ -2904,6 +3649,29 @@ func (p *parser) parseIs(left Expr) Expr {
 	operator := "IS"
 	if not {
 		operator = "IS NOT"
+	}
+	if p.options.Dialect == DialectPostgreSQL && p.matchWord("JSON") {
+		operator += " JSON"
+		if p.peek().IsWord("VALUE") || p.peek().IsWord("SCALAR") || p.peek().IsWord("OBJECT") {
+			operator += " " + strings.ToUpper(p.advance().Text)
+		} else if p.matchWord("ARRAY") {
+			operator += " ARRAY"
+			if p.peek().IsWord("WITH") || p.peek().IsWord("WITHOUT") {
+				operator += " " + strings.ToUpper(p.advance().Text)
+				if p.matchWord("UNIQUE") {
+					operator += " UNIQUE"
+					if p.matchWord("KEYS") {
+						operator += " KEYS"
+					}
+				}
+			} else if p.matchWord("UNIQUE") {
+				operator += " UNIQUE"
+				if p.matchWord("KEYS") {
+					operator += " KEYS"
+				}
+			}
+		}
+		return &IsExpr{nodeBase: nodeBase{span: Span{Start: start, End: p.lastEnd}}, Value: left, Operator: operator, Right: &RawExpr{Raw: ""}}
 	}
 	if p.matchWord("DISTINCT") {
 		operator += " DISTINCT"
@@ -2928,10 +3696,16 @@ func (p *parser) parsePrefix() Expr {
 	if p.isGroupingStart() {
 		return p.parseGroupingExpr()
 	}
-	if tok.IsWord("NOT") || tok.Text == "+" || tok.Text == "-" || tok.Text == "~" {
+	if tok.IsWord("NOT") || tok.Text == "+" || tok.Text == "-" || tok.Text == "~" || tok.Text == "|/" || tok.Text == "||/" {
 		p.advance()
 		right := p.parseExpression(7)
 		return &UnaryExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: right.SourceSpan().End}}, Operator: tok.Text, Expr: right}
+	}
+	if p.options.Dialect == DialectOracle && (tok.IsWord("PRIOR") || tok.IsWord("CONNECT_BY_ROOT")) {
+		start := p.advance().Span.Start
+		operand := p.parsePrefix()
+		operand = p.parsePostfix(operand)
+		return &RawExpr{nodeBase: nodeBase{span: Span{Start: start, End: operand.SourceSpan().End}}, Raw: strings.TrimSpace(p.text[start:operand.SourceSpan().End])}
 	}
 	if tok.Text == "(" {
 		p.advance()
@@ -3023,6 +3797,32 @@ func (p *parser) parsePrefix() Expr {
 		return &LiteralExpr{nodeBase: nodeBase{span: tok.Span}, KindValue: LiteralString, Raw: tok.Text}
 	case TokenNumber:
 		p.advance()
+		if p.options.Dialect == DialectClickHouse && strings.HasSuffix(tok.Text, "_") && p.peek().Kind == TokenIdentifier && tok.Span.End == p.peek().Span.Start {
+			tail := p.advance()
+			return &RawExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: tail.Span.End}}, Raw: tok.Text + tail.Text}
+		}
+		if p.options.Dialect == DialectHive && p.peek().Kind == TokenIdentifier && tok.Span.End == p.peek().Span.Start {
+			suffix := p.peek().Text
+			typeName := ""
+			switch strings.ToUpper(suffix) {
+			case "S":
+				typeName = "SMALLINT"
+			case "Y":
+				typeName = "TINYINT"
+			case "L":
+				typeName = "BIGINT"
+			case "BD":
+				typeName = "DECIMAL"
+			}
+			if typeName != "" {
+				tail := p.advance()
+				return &TypedLiteralExpr{
+					nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: tail.Span.End}},
+					TypeName: []Identifier{{Text: typeName}},
+					Value:    &LiteralExpr{nodeBase: nodeBase{span: tok.Span}, KindValue: LiteralNumber, Raw: tok.Text},
+				}
+			}
+		}
 		return &LiteralExpr{nodeBase: nodeBase{span: tok.Span}, KindValue: LiteralNumber, Raw: tok.Text}
 	case TokenParameter:
 		p.advance()
@@ -3068,9 +3868,25 @@ func (p *parser) parsePrefix() Expr {
 		if depth > 0 {
 			p.report(Diagnostic{Severity: SeverityError, Code: "PARSE_UNCLOSED_BRACE", Message: "unclosed map or struct literal; expected }", Span: Span{Start: end, End: end}, Found: p.peek().Kind, Recovery: RecoveryInserted})
 		}
+		if p.options.Dialect == DialectExasol {
+			raw := strings.TrimSpace(p.text[start:end])
+			if len(raw) >= 4 && raw[0] == '{' && raw[len(raw)-1] == '}' {
+				body := raw[1 : len(raw)-1]
+				if len(body) >= 3 && (strings.HasPrefix(strings.ToLower(body), "d'") || strings.HasPrefix(strings.ToLower(body), "ts'")) && strings.HasSuffix(body, "'") {
+					kind := "TO_DATE"
+					prefixLength := 2
+					if strings.HasPrefix(strings.ToLower(body), "ts'") {
+						kind = "TO_TIMESTAMP"
+						prefixLength = 3
+					}
+					value := body[prefixLength : len(body)-1]
+					return &FunctionCallExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Name: []Identifier{{Text: kind}}, Args: []Expr{&LiteralExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, KindValue: LiteralString, Raw: "'" + strings.ReplaceAll(value, "'", "''") + "'"}}}
+				}
+			}
+		}
 		return &RawExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Raw: p.text[start:end]}
 	}
-	if p.isNameToken(tok) && (!p.isStructuralKeyword(tok) || tok.IsWord("END") || tok.IsWord("LEFT") || tok.IsWord("RIGHT") || tok.IsWord("OVERLAPS") || tok.IsWord("STRAIGHT_JOIN") || (tok.IsWord("VALUES") && p.peekTextAfter(".")) || (tok.IsWord("REPLACE") && p.peekTextAfter("(")) || (tok.IsWord("EXCLUDE") && p.peekTextAfter(":=")) || p.options.Dialect == DialectSnowflake && (tok.IsWord("REPLACE") || tok.IsWord("EXCLUDE") || tok.IsWord("RENAME") || tok.IsWord("LIKE") || tok.IsWord("ILIKE") || tok.IsWord("GROUP"))) {
+	if p.isNameToken(tok) && (!p.isStructuralKeyword(tok) || tok.IsWord("END") || tok.IsWord("GROUP") || tok.IsWord("LEFT") || tok.IsWord("RIGHT") || tok.IsWord("OVERLAPS") || tok.IsWord("STRAIGHT_JOIN") || (tok.IsWord("VALUES") && p.peekTextAfter(".")) || (tok.IsWord("REPLACE") && p.peekTextAfter("(")) || (tok.IsWord("EXCLUDE") && (p.peekTextAfter(":=") || p.options.Dialect == DialectRedshift)) || (p.options.Dialect == DialectClickHouse && (p.peekTextAfter("(") || tok.IsWord("LIKE"))) || ((p.options.Dialect == DialectSQLite || p.options.Dialect == DialectSpark || p.options.Dialect == DialectDatabricks || p.options.Dialect == DialectHive) && (tok.IsWord("LIKE") || tok.IsWord("ILIKE") || tok.IsWord("GLOB")) && p.peekTextAfter("(")) || p.options.Dialect == DialectSnowflake && (tok.IsWord("REPLACE") || tok.IsWord("EXCLUDE") || tok.IsWord("RENAME") || tok.IsWord("LIKE") || tok.IsWord("ILIKE") || tok.IsWord("GROUP"))) {
 		parts, _ := p.parseNameParts()
 		if p.options.Dialect == DialectDuckDB && len(parts) == 1 && strings.EqualFold(parts[0].Text, "COLUMNS") && p.matchText("(") {
 			rawArgs, end := p.captureBalancedFunctionArguments()
@@ -3079,7 +3895,7 @@ func (p *parser) parsePrefix() Expr {
 		if p.options.Dialect == DialectDuckDB && len(parts) == 1 && strings.EqualFold(parts[0].Text, "ARRAY") && p.peek().Text == "[" {
 			return p.parseDuckDBArrayLiteral(tok.Span.Start)
 		}
-		if p.options.Dialect == DialectSnowflake && len(parts) == 1 && strings.EqualFold(parts[0].Text, "X") && p.peek().Kind == TokenString && parts[0].Span.End == p.peek().Span.Start {
+		if (p.options.Dialect == DialectSnowflake || p.options.Dialect == DialectTeradata || p.options.Dialect == DialectRedshift) && len(parts) == 1 && strings.EqualFold(parts[0].Text, "X") && p.peek().Kind == TokenString && parts[0].Span.End == p.peek().Span.Start {
 			value := p.advance()
 			return &RawExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: value.Span.End}}, Raw: p.text[tok.Span.Start:value.Span.End]}
 		}
@@ -3088,9 +3904,28 @@ func (p *parser) parsePrefix() Expr {
 			operand = p.parsePostfix(operand)
 			return &RawExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: operand.SourceSpan().End}}, Raw: p.text[tok.Span.Start:operand.SourceSpan().End]}
 		}
+		if len(parts) == 1 && strings.EqualFold(parts[0].Text, "NEXT") && p.matchWord("VALUE") {
+			p.expectWord("FOR", "after NEXT VALUE")
+			p.parseNameParts()
+			if p.matchWord("OVER") {
+				p.parseWindowSpecPtr()
+			}
+			return &RawExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: p.lastEnd}}, Raw: strings.TrimSpace(p.text[tok.Span.Start:p.lastEnd])}
+		}
 		if len(parts) == 1 && strings.EqualFold(parts[0].Text, "E") && p.peek().Kind == TokenString && parts[0].Span.End == p.peek().Span.Start {
 			value := p.advance()
 			return &RawExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: value.Span.End}}, Raw: "e" + value.Text}
+		}
+		if len(parts) == 1 && strings.EqualFold(parts[0].Text, "R") && p.options.Dialect == DialectDatabricks && p.peek().Kind == TokenQuotedIdentifier && parts[0].Span.End == p.peek().Span.Start {
+			value := p.advance()
+			raw := value.Text
+			if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+				content := raw[1 : len(raw)-1]
+				content = strings.ReplaceAll(content, `\`, `\\`)
+				content = strings.ReplaceAll(content, "'", "''")
+				raw = "'" + content + "'"
+			}
+			return &LiteralExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: value.Span.End}}, KindValue: LiteralString, Raw: raw}
 		}
 		if len(parts) == 1 && strings.EqualFold(parts[0].Text, "R") && p.options.Dialect == DialectSpark && p.peek().Kind == TokenString && parts[0].Span.End == p.peek().Span.Start {
 			value := p.advance()
@@ -3104,7 +3939,7 @@ func (p *parser) parsePrefix() Expr {
 			value := p.advance()
 			return &LiteralExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: value.Span.End}}, KindValue: LiteralString, Raw: value.Text}
 		}
-		if len(parts) == 1 && strings.EqualFold(parts[0].Text, "EXISTS") && p.matchText("(") {
+		if len(parts) == 1 && strings.EqualFold(parts[0].Text, "EXISTS") && p.queryStartsAfterParen() && p.matchText("(") {
 			var query *SelectStmt
 			if p.isQueryStart() {
 				query = p.parseSelect()
@@ -3137,14 +3972,28 @@ func (p *parser) parsePrefix() Expr {
 			if p.matchWord("ELSE") {
 				elseExpr = p.parseRequiredExpr("after IF ELSE")
 			}
-			p.expectWord("END", "to close IF expression")
+			if p.options.Dialect == DialectExasol {
+				p.expectWord("ENDIF", "to close IF expression")
+			} else {
+				p.expectWord("END", "to close IF expression")
+			}
 			return &CaseExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: p.lastEnd}}, Whens: []CaseWhen{{Condition: condition, Result: result}}, Else: elseExpr}
+		}
+		if p.options.Dialect == DialectOracle && len(parts) == 1 && strings.EqualFold(parts[0].Text, "CAST") && p.peek().Text == "(" && p.oracleCastNeedsRawArguments() {
+			p.advance()
+			_, end := p.captureBalancedFunctionArguments()
+			return &RawExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: end}}, Raw: p.text[tok.Span.Start:end]}
 		}
 		if len(parts) == 1 && (strings.EqualFold(parts[0].Text, "CAST") || strings.EqualFold(parts[0].Text, "TRY_CAST")) && p.matchText("(") {
 			return p.parseCast(tok, parts[0].Text)
 		}
-		if len(parts) == 1 && strings.EqualFold(parts[0].Text, "EXTRACT") && p.matchText("(") {
+		if len(parts) == 1 && strings.EqualFold(parts[0].Text, "EXTRACT") && p.options.Dialect != DialectClickHouse && p.matchText("(") {
 			field := p.parseRequiredExpr("inside EXTRACT")
+			if p.options.Dialect == DialectSnowflake && p.matchText(",") {
+				source := p.parseRequiredExpr("after EXTRACT field")
+				p.expectText(")", "to close EXTRACT")
+				return &ExtractExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: p.lastEnd}}, Field: field, Source: source}
+			}
 			p.expectWord("FROM", "inside EXTRACT")
 			source := p.parseRequiredExpr("after EXTRACT FROM")
 			p.expectText(")", "to close EXTRACT")
@@ -3206,6 +4055,12 @@ func (p *parser) parsePrefix() Expr {
 				RawArgs:  p.text[open.Span.Start:end],
 			}
 		}
+		if (p.options.Dialect == DialectOracle || p.options.Dialect == DialectRedshift) && p.peek().Text == "(" && p.pos+2 < len(p.tokens) && p.tokens[p.pos+1].Text == "+" && p.tokens[p.pos+2].Text == ")" {
+			p.advance()
+			p.advance()
+			end := p.advance().Span.End
+			return &RawExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: end}}, Raw: strings.TrimSpace(p.text[tok.Span.Start:end])}
+		}
 		if p.matchText("(") {
 			if p.options.Dialect == DialectSnowflake && len(parts) == 1 && strings.EqualFold(parts[0].Text, "DATE_PART") && !p.peek().IsWord("DISTINCT") {
 				position := p.pos
@@ -3265,6 +4120,26 @@ func (p *parser) parsePrefix() Expr {
 				if p.matchWord("NULLS") {
 					function.RespectNulls = true
 				}
+			}
+			if p.options.Dialect == DialectSnowflake && len(parts) == 1 && strings.EqualFold(parts[0].Text, "NTH_VALUE") && (p.peekWords("FROM", "FIRST") || p.peekWords("FROM", "LAST")) {
+				// Snowflake places NTH_VALUE's FROM FIRST/LAST modifier after
+				// the closing argument parenthesis. Without this lookahead, the
+				// ordinary SELECT parser treats FROM FIRST as the query source.
+				p.advance() // FROM
+				p.advance() // FIRST or LAST; targets do not retain this modifier.
+				if p.matchWord("IGNORE") {
+					if p.matchWord("NULLS") {
+						function.IgnoreNulls = true
+					}
+				} else if p.matchWord("RESPECT") {
+					if p.matchWord("NULLS") {
+						function.RespectNulls = true
+					}
+				}
+				if p.matchWord("OVER") {
+					function.Over = p.parseWindowSpecPtr()
+				}
+				function.nodeBase.span.End = p.lastEnd
 			}
 			if p.matchWord("OVER") {
 				function.Over = p.parseWindowSpecPtr()
@@ -3367,6 +4242,15 @@ func (p *parser) parseExpressionAlias(expression Expr) Expr {
 
 func (p *parser) parseCast(start Token, keyword string) Expr {
 	value := p.parseRequiredExpr("inside " + keyword)
+	if p.options.Dialect == DialectClickHouse && p.matchText(",") {
+		typeExpr := p.parseRequiredExpr("after comma in " + keyword)
+		p.expectText(")", "to close "+keyword)
+		return &FunctionCallExpr{
+			nodeBase: nodeBase{span: Span{Start: start.Span.Start, End: p.lastEnd}},
+			Name:     []Identifier{{Text: strings.ToUpper(keyword)}},
+			Args:     []Expr{value, typeExpr},
+		}
+	}
 	p.expectWord("AS", "inside "+keyword)
 	typeExpr, suffix := p.parseCastType()
 	p.expectText(")", "to close "+keyword)
@@ -3390,7 +4274,16 @@ func (p *parser) parseCastType() (Expr, []Identifier) {
 		p.advance()
 		parts[0].Text = "CHARACTER VARYING"
 	}
+	if p.options.Dialect == DialectExasol && len(parts) == 1 && strings.EqualFold(parts[0].Text, "LONG") && p.peek().IsWord("VARCHAR") {
+		p.advance()
+		parts[0].Text = "LONG VARCHAR"
+	}
 	var typeExpr Expr = &IdentifierExpr{nodeBase: nodeBase{span: Span{Start: start, End: p.lastEnd}}, Parts: parts}
+	if p.options.Dialect == DialectMaterialize && p.peek().Text == "[" {
+		end := p.captureMaterializeBracketSuffix()
+		typeExpr = &RawExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Raw: strings.TrimSpace(p.text[start:end])}
+		return typeExpr, nil
+	}
 	if p.matchText("(") {
 		var args []Expr
 		if isStructuredCastType(parts) {
@@ -3407,6 +4300,23 @@ func (p *parser) parseCastType() (Expr, []Identifier) {
 	}
 	typeExpr = p.parsePostfix(typeExpr)
 	var suffix []Identifier
+	if p.options.Dialect == DialectMySQL && len(parts) == 1 && (strings.EqualFold(parts[0].Text, "SIGNED") || strings.EqualFold(parts[0].Text, "UNSIGNED")) {
+		// MySQL accepts SIGNED/UNSIGNED INTEGER, but its canonical cast type
+		// is the shorter SIGNED/UNSIGNED spelling.
+		p.matchWord("INTEGER")
+	}
+	if p.options.Dialect == DialectMySQL && len(parts) == 1 && (strings.EqualFold(parts[0].Text, "CHAR") || strings.EqualFold(parts[0].Text, "CHARACTER")) && p.matchWord("CHARACTER") {
+		p.expectWord("SET", "after CHARACTER in CAST type")
+		suffix = append(suffix, Identifier{Text: "CHARACTER SET"})
+		if charset, ok := p.parseIdentifier(true); ok {
+			suffix = append(suffix, charset)
+		}
+	}
+	if p.options.Dialect == DialectMaterialize {
+		for p.peek().IsWord("LIST") {
+			suffix = append(suffix, Identifier{Text: strings.ToUpper(p.advance().Text), Span: p.tokens[p.pos-1].Span})
+		}
+	}
 	if p.peek().IsWord("WITH") || p.peek().IsWord("WITHOUT") {
 		for p.isNameToken(p.peek()) && !p.isStructuralKeyword(p.peek()) && p.peek().Text != ")" {
 			identifier, ok := p.parseIdentifier(true)
@@ -3419,8 +4329,16 @@ func (p *parser) parseCastType() (Expr, []Identifier) {
 		identifier, _ := p.parseIdentifier(true)
 		suffix = append(suffix, identifier)
 	} else if len(parts) == 1 && strings.EqualFold(parts[0].Text, "INTERVAL") && p.isNameToken(p.peek()) && !p.isStructuralKeyword(p.peek()) {
-		identifier, _ := p.parseIdentifier(true)
-		suffix = append(suffix, identifier)
+		for p.isNameToken(p.peek()) && p.peek().Text != ")" {
+			if p.isStructuralKeyword(p.peek()) && !p.peek().IsWord("TO") {
+				break
+			}
+			identifier, ok := p.parseIdentifier(true)
+			if !ok {
+				break
+			}
+			suffix = append(suffix, identifier)
+		}
 	}
 	if p.options.Dialect == DialectSnowflake && (p.peek().IsWord("RENAME") || p.peek().IsWord("ADD")) {
 		start := p.advance().Span.Start
@@ -3450,7 +4368,9 @@ func (p *parser) parseCastType() (Expr, []Identifier) {
 	}
 	for p.matchWord("COLLATE") {
 		suffix = append(suffix, Identifier{Text: "COLLATE"})
-		if identifier, ok := p.parseIdentifier(true); ok {
+		if p.options.Dialect == DialectSingleStore && (p.peek().Kind == TokenString || p.peek().Kind == TokenUnterminatedString) {
+			suffix = append(suffix, Identifier{Text: p.advance().Text})
+		} else if identifier, ok := p.parseIdentifier(true); ok {
 			suffix = append(suffix, identifier)
 		} else {
 			p.reportExpectedIdentifier("after COLLATE in CAST")
@@ -3460,12 +4380,52 @@ func (p *parser) parseCastType() (Expr, []Identifier) {
 	return typeExpr, suffix
 }
 
+func (p *parser) parseSingleStoreCastType() (Expr, []Identifier) {
+	start := p.peek().Span.Start
+	if p.peek().Kind == TokenParameter || p.peek().Kind == TokenNumber || p.peek().Text == "%" {
+		end := p.advance().Span.End
+		if p.peek().Span.Start == end && p.isNameToken(p.peek()) {
+			end = p.advance().Span.End
+		}
+		return &RawExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Raw: strings.TrimSpace(p.text[start:end])}, nil
+	}
+	if p.isNameToken(p.peek()) && p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].Text == "(" {
+		p.advance()
+		p.advance()
+		_, end := p.captureBalancedFunctionArguments()
+		return &RawExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Raw: strings.TrimSpace(p.text[start:end])}, nil
+	}
+	return p.parseCastType()
+}
+
+func (p *parser) captureMaterializeBracketSuffix() int {
+	depth := 0
+	end := p.lastEnd
+	for p.peek().Kind != TokenEOF {
+		tok := p.advance()
+		end = tok.Span.End
+		switch tok.Text {
+		case "[":
+			depth++
+		case "]":
+			depth--
+			if depth == 0 {
+				return end
+			}
+		}
+	}
+	if depth > 0 {
+		p.report(Diagnostic{Severity: SeverityError, Code: "PARSE_UNCLOSED_BRACKET", Message: "unclosed Materialize type; expected ]", Span: Span{Start: end, End: end}, Found: p.peek().Kind, Recovery: RecoveryInserted})
+	}
+	return end
+}
+
 func isStructuredCastType(parts []Identifier) bool {
 	if len(parts) != 1 {
 		return false
 	}
 	switch strings.ToUpper(parts[0].Text) {
-	case "ARRAY", "LIST", "MAP", "OBJECT", "ROW", "STRUCT":
+	case "ARRAY", "LIST", "MAP", "OBJECT", "ROW", "STRUCT", "NESTED", "JSON", "TUPLE", "VARCHAR2", "NVARCHAR2", "NUMBER", "BINARY_FLOAT", "BINARY_DOUBLE":
 		return true
 	default:
 		return false
@@ -3474,7 +4434,16 @@ func isStructuredCastType(parts []Identifier) bool {
 
 func (p *parser) intervalValueStart() bool {
 	tok := p.peek()
-	return tok.Kind == TokenString || tok.Kind == TokenUnterminatedString || tok.Kind == TokenNumber || tok.Text == "(" || tok.Text == "+" || tok.Text == "-" || (p.isNameToken(tok) && !p.isStructuralKeyword(tok) && !tok.IsWord("AS"))
+	return tok.Kind == TokenString || tok.Kind == TokenUnterminatedString || tok.Kind == TokenNumber || tok.Text == "(" || tok.Text == "+" || tok.Text == "-" || (p.isNameToken(tok) && !p.isStructuralKeyword(tok) && !tok.IsWord("AS") && !isWindowFrameWord(tok))
+}
+
+func isWindowFrameWord(tok Token) bool {
+	for _, word := range []string{"ROWS", "RANGE", "GROUPS", "PRECEDING", "FOLLOWING", "CURRENT", "EXCLUDE"} {
+		if tok.IsWord(word) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *parser) parseInterval(start Token, parts []Identifier) Expr {
@@ -3522,7 +4491,7 @@ func (p *parser) parseInterval(start Token, parts []Identifier) Expr {
 		return current
 	}
 	var qualifiers []Expr
-	for p.isNameToken(p.peek()) && !p.isStructuralKeyword(p.peek()) && !p.peek().IsWord("AS") {
+	for p.isNameToken(p.peek()) && !p.isStructuralKeyword(p.peek()) && !p.peek().IsWord("AS") && !isWindowFrameWord(p.peek()) {
 		qualifier := p.parsePrefix()
 		qualifier = p.parsePostfix(qualifier)
 		qualifiers = append(qualifiers, qualifier)
@@ -3615,7 +4584,7 @@ func (p *parser) isTypedLiteralName(parts []Identifier) bool {
 		return false
 	}
 	switch strings.ToUpper(parts[0].Text) {
-	case "DATE", "TIME", "TIMESTAMP", "DATETIME", "JSON", "INTERVAL", "UUID", "N",
+	case "DATE", "TIME", "TIMESTAMP", "DATETIME", "JSON", "INTERVAL", "UUID", "INET", "POINT", "N",
 		"INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC",
 		"BOOLEAN", "BOOL", "VARCHAR", "CHAR", "STRING", "TEXT":
 		return true
@@ -3629,11 +4598,39 @@ func isFunctionLikeTypeName(parts []Identifier) bool {
 		return false
 	}
 	switch strings.ToUpper(parts[0].Text) {
-	case "CHAR", "VARCHAR", "STRING", "TEXT", "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "BOOLEAN", "BOOL", "UUID":
+	case "DATE", "CHAR", "VARCHAR", "STRING", "TEXT", "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "BOOLEAN", "BOOL", "UUID":
 		return true
 	default:
 		return false
 	}
+}
+
+// oracleCastNeedsRawArguments reports whether an Oracle CAST contains
+// dialect-specific clauses that are not represented by the generic CAST AST
+// yet (for example DEFAULT ... ON CONVERSION ERROR). Keeping the complete
+// argument text makes identity generation lossless while still allowing the
+// ordinary typed CAST path for standard casts.
+func (p *parser) oracleCastNeedsRawArguments() bool {
+	depth := 0
+	for index := p.pos; index < len(p.tokens); index++ {
+		token := p.tokens[index]
+		if token.Kind == TokenComment {
+			continue
+		}
+		switch token.Text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+			if depth == 0 {
+				return false
+			}
+		}
+		if depth > 0 && token.IsWord("DEFAULT") {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *parser) jsonObjectNeedsRawArgs() bool {
@@ -3657,6 +4654,9 @@ func (p *parser) jsonObjectNeedsRawArgs() bool {
 				return true
 			}
 		default:
+			if (p.options.Dialect == DialectOracle || p.options.Dialect == DialectPresto || p.options.Dialect == DialectTrino) && depth == 1 && (token.IsWord("KEY") || token.IsWord("IS")) {
+				return true
+			}
 			if depth == 1 {
 				content = true
 			}
@@ -4011,13 +5011,25 @@ func (p *parser) parseIdentifier(allowKeyword bool) (Identifier, bool) {
 		p.advance()
 		return Identifier{Text: tok.Text, Span: tok.Span}, true
 	}
-	if tok.Kind != TokenIdentifier && tok.Kind != TokenQuotedIdentifier && !(tok.Kind == TokenKeyword && (allowKeyword || !p.isStructuralKeyword(tok) || tok.IsWord("WINDOW") || (p.options.Dialect == DialectBigQuery && tok.IsWord("AT")))) {
+	if p.options.Dialect == DialectMySQL && tok.Kind == TokenNumber {
+		nextIndex := p.pos + 1
+		if nextIndex < len(p.tokens) && tok.Span.End == p.tokens[nextIndex].Span.Start && (p.tokens[nextIndex].Kind == TokenIdentifier || p.tokens[nextIndex].Kind == TokenKeyword) {
+			next := p.tokens[nextIndex]
+			p.advance()
+			p.advance()
+			return Identifier{Text: tok.Text + next.Text, Span: Span{Start: tok.Span.Start, End: next.Span.End}}, true
+		}
+	}
+	if tok.Kind != TokenIdentifier && tok.Kind != TokenQuotedIdentifier && !(tok.Kind == TokenKeyword && (allowKeyword || !p.isStructuralKeyword(tok) || tok.IsWord("WINDOW") || (p.options.Dialect == DialectBigQuery && (tok.IsWord("AT") || tok.IsWord("SAMPLE"))) || (p.options.Dialect == DialectRedshift && tok.IsWord("EXCLUDE")))) {
 		return Identifier{}, false
 	}
 	p.advance()
 	identifier := Identifier{Text: identifierText(tok), Quoted: tok.Kind == TokenQuotedIdentifier, Span: tok.Span}
 	if identifier.Quoted && len(tok.Text) > 0 {
 		identifier.Quote = tok.Text[0]
+		if p.options.Dialect == DialectExasol && identifier.Quote == '[' {
+			identifier.Quote = '"'
+		}
 	}
 	return identifier, true
 }
@@ -4029,7 +5041,11 @@ func identifierText(tok Token) string {
 	if tok.Text[0] == '[' && tok.Text[len(tok.Text)-1] == ']' {
 		return strings.ReplaceAll(tok.Text[1:len(tok.Text)-1], "]]", "]")
 	}
-	return strings.ReplaceAll(tok.Text[1:len(tok.Text)-1], tok.Text[:1]+tok.Text[:1], tok.Text[:1])
+	text := tok.Text[1 : len(tok.Text)-1]
+	if tok.Text[0] == '`' {
+		text = strings.ReplaceAll(text, "\\`", "`")
+	}
+	return strings.ReplaceAll(text, tok.Text[:1]+tok.Text[:1], tok.Text[:1])
 }
 
 func (p *parser) parseIdentifierList(context string) []Identifier {
@@ -4072,10 +5088,30 @@ func (p *parser) canStartBareAlias() bool {
 	if tok.IsWord("WINDOW") {
 		return p.isWindowAliasContinuation()
 	}
+	if p.options.Dialect == DialectOracle && (tok.IsWord("BULK") || tok.IsWord("KEEP")) {
+		return false
+	}
+	// ClickHouse uses FINAL as a relation modifier (`FROM table FINAL`), not
+	// as a projection or relation alias. Keep it out of the global clause
+	// boundary set so a CTE named `final` remains usable in FROM, but reject it
+	// here where aliases are considered.
+	if p.options.Dialect == DialectClickHouse && tok.IsWord("FINAL") {
+		return false
+	}
+	if p.options.Dialect == DialectClickHouse && tok.IsWord("APPLY") && !p.peekTextAfter("(") {
+		return true
+	}
 	if !p.isNameToken(tok) || p.isClauseBoundary() {
 		return false
 	}
-	return !p.isStructuralKeyword(tok) || isAliasKeyword(tok)
+	return !p.isStructuralKeyword(tok) || isAliasKeyword(tok) || (p.options.Dialect == DialectRedshift && tok.IsWord("EXCLUDE"))
+}
+
+func (p *parser) isStringProjectionAlias() bool {
+	if p.options.Dialect != DialectMySQL && p.options.Dialect != DialectSQLite && p.options.Dialect != DialectTSQL {
+		return false
+	}
+	return p.peek().Kind == TokenString || p.peek().Kind == TokenUnterminatedString
 }
 
 func isAliasKeyword(tok Token) bool {
@@ -4124,7 +5160,7 @@ func (p *parser) isExpressionStatementStart(tok Token) bool {
 	if tok.Kind == TokenString || tok.Kind == TokenUnterminatedString || tok.Kind == TokenNumber || tok.Kind == TokenParameter {
 		return true
 	}
-	if tok.Text == "(" || tok.Text == "{" || tok.Text == "[" || tok.Text == "+" || tok.Text == "-" || tok.Text == "~" || tok.Text == "*" {
+	if tok.Text == "(" || tok.Text == "{" || tok.Text == "[" || tok.Text == "+" || tok.Text == "-" || tok.Text == "~" || tok.Text == "|/" || tok.Text == "||/" || tok.Text == "*" {
 		return true
 	}
 	return p.isNameToken(tok) && !p.isStatementKeyword(tok)
@@ -4134,9 +5170,28 @@ func (p *parser) isStatementKeyword(tok Token) bool {
 	if tok.Kind != TokenKeyword {
 		return false
 	}
+	// PostgreSQL uses END as the spelling of a transaction terminator in a
+	// number of fixtures.  In T-SQL and the other procedural dialects, a bare
+	// END is also a valid incomplete/raw statement boundary, so do not make it
+	// a universal statement starter.
+	if strings.EqualFold(tok.Text, "END") {
+		return p.options.Dialect == DialectPostgreSQL
+	}
 	switch strings.ToUpper(tok.Text) {
-	case "CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE", "GRANT", "REVOKE", "EXPLAIN", "SHOW", "DESCRIBE", "USE", "CACHE", "UNCACHE", "LOAD", "COMMENT", "PRAGMA", "KILL", "BEGIN", "START", "COMMIT", "ROLLBACK", "VACUUM", "ANALYZE", "EXPORT", "IMPORT", "CALL", "EXEC", "EXECUTE", "REFRESH", "DEALLOCATE", "RESET", "COPY", "UNLOAD", "DECLARE", "PRINT", "FOR", "LOOP", "REPEAT", "WHILE":
+	case "CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE", "MERGE", "GRANT", "REVOKE", "EXPLAIN", "SHOW", "DESCRIBE", "USE", "CACHE", "UNCACHE", "LOAD", "COMMENT", "PRAGMA", "KILL", "BEGIN", "START", "COMMIT", "ROLLBACK", "VACUUM", "ANALYZE", "EXPORT", "IMPORT", "CALL", "EXEC", "EXECUTE", "REFRESH", "DEALLOCATE", "RESET", "COPY", "UNLOAD", "DECLARE", "PRINT", "FOR", "LOOP", "REPEAT", "WHILE":
 		return true
+	case "OPEN":
+		return p.options.Dialect == DialectExasol
+	case "REPLACE":
+		return p.options.Dialect == DialectMySQL
+	case "ATTACH", "DETACH", "EXCHANGE", "OPTIMIZE", "SYSTEM":
+		return p.options.Dialect == DialectClickHouse
+	case "LOCK", "UNLOCK":
+		return p.options.Dialect == DialectMySQL
+	case "IF":
+		return p.options.Dialect == DialectTSQL
+	case "TRUNCATE":
+		return !p.peekTextAfter("(")
 	default:
 		return false
 	}
@@ -4150,8 +5205,33 @@ func (p *parser) isStructuralKeyword(tok Token) bool {
 	if tok.Kind != TokenKeyword {
 		return false
 	}
-	switch strings.ToUpper(tok.Text) {
-	case "SELECT", "FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "FETCH", "TABLESAMPLE", "PIVOT", "UNPIVOT", "REPLACE", "UNION", "INTERSECT", "EXCEPT", "EXCLUDE", "JOIN", "STRAIGHT_JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL", "OUTER", "SEMI", "ANTI", "ON", "USING", "AND", "OR", "NOT", "IN", "BETWEEN", "IS", "LIKE", "ILIKE", "AS", "FOR", "WHEN", "THEN", "ELSE", "END", "LATERAL", "CONNECT", "CLUSTER", "SAMPLE", "SETTINGS", "MATCH_RECOGNIZE", "INDEXED", "WINDOW", "AT":
+	switch tok.word {
+	case tokenWordSelect, tokenWordFrom, tokenWordWhere, tokenWordGroup,
+		tokenWordHaving, tokenWordOrder, tokenWordLimit, tokenWordFetch,
+		tokenWordTableSample, tokenWordPivot, tokenWordUnpivot, tokenWordReplace,
+		tokenWordUnion, tokenWordIntersect, tokenWordExcept, tokenWordExclude,
+		tokenWordJoin, tokenWordStraightJoin, tokenWordInner, tokenWordLeft,
+		tokenWordRight, tokenWordFull, tokenWordCross, tokenWordNatural,
+		tokenWordOuter, tokenWordSemi, tokenWordAnti, tokenWordOn,
+		tokenWordUsing, tokenWordAnd, tokenWordOr, tokenWordNot, tokenWordIn,
+		tokenWordBetween, tokenWordIs, tokenWordLike, tokenWordILike,
+		tokenWordAs, tokenWordFor, tokenWordWhen, tokenWordThen, tokenWordElse,
+		tokenWordEnd, tokenWordLateral, tokenWordConnect, tokenWordCluster,
+		tokenWordSample, tokenWordSettings, tokenWordMatchRecognize,
+		tokenWordIndexed, tokenWordWindow, tokenWordAt:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSelectClauseBoundaryWord(word tokenWord) bool {
+	switch word {
+	case tokenWordFrom, tokenWordWhere, tokenWordGroup, tokenWordHaving,
+		tokenWordOrder, tokenWordLimit, tokenWordOffset, tokenWordFetch,
+		tokenWordQualify, tokenWordUnion, tokenWordIntersect, tokenWordExcept,
+		tokenWordFor, tokenWordCluster, tokenWordSample, tokenWordSettings,
+		tokenWordMatchRecognize, tokenWordIndexed, tokenWordWindow, tokenWordAt:
 		return true
 	default:
 		return false
@@ -4160,41 +5240,91 @@ func (p *parser) isStructuralKeyword(tok Token) bool {
 
 func (p *parser) isClauseBoundary() bool {
 	tok := p.peek()
-	if p.options.Dialect == DialectTSQL && tok.IsWord("INTO") {
-		return true
-	}
 	if tok.Kind == TokenEOF || tok.Text == ";" || tok.Text == ")" || tok.Text == "," {
 		return true
 	}
-	for _, word := range []string{"FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "QUALIFY", "UNION", "INTERSECT", "EXCEPT", "FOR", "CLUSTER", "SAMPLE", "SETTINGS", "MATCH_RECOGNIZE", "INDEXED", "WINDOW", "AT"} {
-		if tok.IsWord(word) {
-			return true
-		}
+	if tok.word == tokenWordInto {
+		return true
 	}
-	return false
+	if p.options.Dialect != DialectGeneric && p.isDialectClauseBoundary(tok) {
+		return true
+	}
+	if tok.word == tokenWordSample && p.options.Dialect == DialectBigQuery {
+		return false
+	}
+	return isSelectClauseBoundaryWord(tok.word) || tok.word == tokenWordOption
 }
 
 func (p *parser) isSelectListBoundary() bool {
 	tok := p.peek()
-	if p.options.Dialect == DialectTSQL && tok.IsWord("INTO") {
-		return true
-	}
 	if p.isTerminalProjectionAlias() {
 		return false
 	}
 	if tok.Kind == TokenEOF || tok.Text == ";" || tok.Text == ")" {
 		return true
 	}
-	for _, word := range []string{"FROM", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "QUALIFY", "UNION", "INTERSECT", "EXCEPT", "FOR", "CLUSTER", "SAMPLE", "SETTINGS", "MATCH_RECOGNIZE", "INDEXED", "WINDOW", "AT"} {
-		if tok.IsWord(word) {
+	if tok.word == tokenWordInto {
+		return true
+	}
+	if p.options.Dialect != DialectGeneric && p.isDialectClauseBoundary(tok) {
+		return true
+	}
+	return isSelectClauseBoundaryWord(tok.word)
+}
+
+func (p *parser) isDialectClauseBoundary(tok Token) bool {
+	switch p.options.Dialect {
+	case DialectHive:
+		return tok.word == tokenWordDistribute || tok.word == tokenWordSort
+	case DialectExasol, DialectRedshift, DialectTeradata, DialectSpark, DialectDatabricks, DialectSnowflake:
+		return tok.word == tokenWordMinus
+	case DialectOracle:
+		return tok.word == tokenWordMinus || tok.word == tokenWordBulk || tok.word == tokenWordKeep
+	case DialectClickHouse:
+		switch tok.word {
+		case tokenWordFormat:
+			// FORMAT is a query tail only when it has a format name. A bare
+			// `SELECT FORMAT` is a valid identifier expression.
+			return p.clickHouseFormatClauseStart()
+		case tokenWordAny:
+			if p.peekTextAfter("(") {
+				return false
+			}
+			return true
+		case tokenWordPrewhere, tokenWordFill, tokenWordWith, tokenWordApply,
+			tokenWordArray, tokenWordGlobal, tokenWordAsof, tokenWordSettings,
+			tokenWordInterpolate:
+			return true
+		}
+	case DialectMySQL:
+		switch tok.word {
+		case tokenWordUse, tokenWordForce, tokenWordIgnore, tokenWordPartition,
+			tokenWordMember, tokenWordSounds, tokenWordMod, tokenWordReturning:
+			return true
+		}
+	case DialectPostgreSQL:
+		if tok.word == tokenWordReturning {
 			return true
 		}
 	}
 	return false
 }
 
+func (p *parser) clickHouseFormatClauseStart() bool {
+	index := p.pos + 1
+	for index < len(p.tokens) && p.tokens[index].Kind == TokenComment {
+		index++
+	}
+	if index >= len(p.tokens) {
+		return false
+	}
+	next := p.tokens[index]
+	return next.Kind != TokenEOF && next.Text != ";" && next.Text != ")" && next.Text != ","
+}
+
 func (p *parser) isTerminalProjectionAlias() bool {
-	if !p.peek().IsWord("LIMIT") && !p.peek().IsWord("OFFSET") {
+	word := p.peek().word
+	if word != tokenWordLimit && word != tokenWordOffset {
 		return false
 	}
 	return !p.hasClauseExpression()
@@ -4216,7 +5346,15 @@ func (p *parser) hasClauseExpression() bool {
 }
 
 func (p *parser) isExpressionBoundary() bool {
-	return p.isClauseBoundary() || p.peek().IsWord("THEN") || p.peek().IsWord("ELSE") || p.peek().IsWord("END") || p.peek().IsWord("JOIN") || p.peek().IsWord("ON")
+	if p.isClauseBoundary() {
+		return true
+	}
+	switch p.peek().word {
+	case tokenWordThen, tokenWordElse, tokenWordEnd, tokenWordJoin, tokenWordOn:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *parser) isBareAliasContinuation() bool {
@@ -4269,6 +5407,13 @@ func (p *parser) isJoinStart() bool {
 	for _, word := range []string{"JOIN", "STRAIGHT_JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL", "OUTER", "SEMI", "ANTI", "POSITIONAL", "ASOF"} {
 		if p.peek().IsWord(word) {
 			return true
+		}
+	}
+	if p.options.Dialect == DialectClickHouse {
+		for _, word := range []string{"GLOBAL", "ANY", "ARRAY"} {
+			if p.peek().IsWord(word) {
+				return true
+			}
 		}
 	}
 	return false
@@ -4329,6 +5474,9 @@ func infixOperator(tok Token) (int, string, bool) {
 	if tok.IsWord("AND") {
 		return 2, "AND", true
 	}
+	if tok.IsWord("XOR") {
+		return 3, "XOR", true
+	}
 	if tok.IsWord("LIKE") || tok.IsWord("ILIKE") || tok.IsWord("GLOB") || tok.IsWord("RLIKE") || tok.IsWord("REGEXP") {
 		return 3, strings.ToUpper(tok.Text), true
 	}
@@ -4341,18 +5489,36 @@ func infixOperator(tok Token) (int, string, bool) {
 	if tok.IsWord("AGAINST") {
 		return 3, "AGAINST", true
 	}
+	if tok.IsWord("SIMILAR") {
+		return 3, "SIMILAR", true
+	}
+	if tok.IsWord("DIV") {
+		return 6, "DIV", true
+	}
+	if tok.IsWord("MOD") {
+		return 6, "MOD", true
+	}
 	switch tok.Text {
-	case "=", "<>", "!=", "<", "<=", ">", ">=", "~", "~*", "!~", "!~*", "~~", "~~~", "!~~", "!~~*", "@>", "<@", "&&", "^@", "<=>":
-		return 3, strings.ToUpper(tok.Text), true
-	case "||", "->", "->>", "#>", "#>>":
+	case "=", "==", "<>", "!=", "<", "<=", ">", ">=", "~", "~*", "!~", "!~*", "~~", "~~*", "~~~", "!~~", "!~~*", "@>", "@?", "@@", "?", "?&", "?|", "<@", "&&", "^@", "<=>", "<->", "<<->>", "^=":
+		operator := strings.ToUpper(tok.Text)
+		if operator == "==" || operator == "^=" {
+			operator = "="
+		}
+		if tok.Text == "^=" {
+			operator = "<>"
+		}
+		return 3, operator, true
+	case "||", "->", "->>", "#>", "#>>", "#-":
 		return 4, tok.Text, true
 	case "??":
 		return 3, tok.Text, true
+	case ":>", "!:>":
+		return 7, tok.Text, true
 	case "-|-":
 		return 3, tok.Text, true
-	case "+", "-", "&", "|", "^", "<<", ">>":
+	case "+", "-", "&", "|", "^", "#", "<<", ">>":
 		return 5, tok.Text, true
-	case "*", "/", "%", "**":
+	case "*", "/", "%", "**", "//":
 		return 6, tok.Text, true
 	default:
 		return 0, "", false

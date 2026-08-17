@@ -1,0 +1,89 @@
+{
+  "description": "Representative SQLGlot transpilation fixtures whose expected output is matched exactly by both Golyglot and the released Polyglot v0.9.1 FFI.",
+  "cases": [
+    {
+      "name": "postgres_make_interval_to_mysql",
+      "feature": "timestamp and interval arithmetic",
+      "fixture": "dialects/postgres.json",
+      "index": 2,
+      "target": "mysql"
+    },
+    {
+      "name": "postgres_update_from_to_mysql",
+      "feature": "UPDATE FROM lowering",
+      "fixture": "dialects/postgres.json",
+      "index": 68,
+      "target": "mysql"
+    },
+    {
+      "name": "bigquery_timestamp_trunc_to_duckdb",
+      "feature": "CTE, UNNEST, typed timestamps, and date truncation",
+      "fixture": "dialects/bigquery.json",
+      "index": 174,
+      "target": "duckdb"
+    },
+    {
+      "name": "duckdb_filtered_aggregate_to_snowflake",
+      "feature": "CTE, set operations, and filtered aggregate lowering",
+      "fixture": "dialects/duckdb.json",
+      "index": 32,
+      "target": "snowflake"
+    },
+    {
+      "name": "mysql_date_add_to_postgres",
+      "feature": "CTE and dynamic interval arithmetic",
+      "fixture": "dialects/mysql.json",
+      "index": 45,
+      "target": "postgres"
+    },
+    {
+      "name": "presto_nested_row_to_duckdb",
+      "feature": "DDL with nested row types",
+      "fixture": "dialects/presto.json",
+      "index": 58,
+      "target": "duckdb"
+    },
+    {
+      "name": "hive_nested_struct_to_spark",
+      "feature": "DDL with nested struct types",
+      "fixture": "dialects/hive.json",
+      "index": 20,
+      "target": "spark"
+    },
+    {
+      "name": "spark_posexplode_to_bigquery",
+      "feature": "zipped array explosion and positional joins",
+      "fixture": "dialects/spark.json",
+      "index": 121,
+      "target": "bigquery"
+    },
+    {
+      "name": "tsql_outer_apply_to_spark",
+      "feature": "lateral join lowering",
+      "fixture": "dialects/tsql.json",
+      "index": 155,
+      "target": "spark"
+    },
+    {
+      "name": "snowflake_json_path_to_postgres",
+      "feature": "quoted JSON path extraction",
+      "fixture": "dialects/snowflake.json",
+      "index": 466,
+      "target": "postgres"
+    },
+    {
+      "name": "clickhouse_nullable_interval_to_postgres",
+      "feature": "nullable timestamp type and interval normalization",
+      "fixture": "dialects/clickhouse.json",
+      "index": 15,
+      "target": "postgres"
+    },
+    {
+      "name": "generic_qualify_to_mysql",
+      "feature": "quoted identifiers, window function, and QUALIFY lowering",
+      "fixture": "dialects/generic.json",
+      "index": 208,
+      "target": "mysql"
+    }
+  ]
+}

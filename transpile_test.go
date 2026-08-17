@@ -18,8 +18,10 @@ func TestTranspileFunctionRewrites(t *testing.T) {
 		{name: "substring", sql: "SELECT SUBSTR(name, 1, 5)", from: DialectGeneric, to: DialectPostgreSQL, want: "SELECT SUBSTRING(name FROM 1 FOR 5)"},
 		{name: "bigquery strings become portable literals", sql: `SELECT "A"`, from: DialectBigQuery, to: DialectDuckDB, want: "SELECT 'A'"},
 		{name: "bigquery date constructor", sql: "SELECT DATE(2024, 1, 15)", from: DialectBigQuery, to: DialectDuckDB, want: "SELECT MAKE_DATE(2024, 1, 15)"},
+		{name: "timestampdiff to bigquery", sql: "SELECT TIMESTAMPDIFF(DAY, started_at, finished_at)", from: DialectMySQL, to: DialectBigQuery, want: "SELECT TIMESTAMP_DIFF(finished_at, started_at, DAY)"},
 		{name: "athena add columns", sql: "ALTER TABLE `foo`.`bar` ADD COLUMN `end_ts` BIGINT", from: DialectAthena, to: DialectAthena, want: "ALTER TABLE `foo`.`bar` ADD COLUMNS (`end_ts` BIGINT)"},
 		{name: "inline named window", sql: "SELECT purchases, LAST_VALUE(item) OVER item_window AS most_popular FROM Produce WINDOW item_window AS (PARTITION BY purchases ORDER BY purchases ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING)", from: DialectBigQuery, to: DialectPresto, want: "SELECT purchases, LAST_VALUE(item) OVER (PARTITION BY purchases ORDER BY purchases NULLS FIRST ROWS BETWEEN 2 PRECEDING AND 2 FOLLOWING) AS most_popular FROM Produce"},
+		{name: "clickhouse preserves native function case", sql: "SELECT arrayJoin(toDateTime('2023-01-01'))", from: DialectClickHouse, to: DialectClickHouse, want: "SELECT arrayJoin(toDateTime('2023-01-01'))"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -69,6 +71,22 @@ func TestFormatOne(t *testing.T) {
 func TestTranspileRejectsMultipleStatementsInOne(t *testing.T) {
 	if _, err := TranspileOne("SELECT 1; SELECT 2", DialectGeneric, DialectPostgreSQL); err == nil {
 		t.Fatal("TranspileOne succeeded for multiple statements")
+	}
+}
+
+func TestTranspileNormalizesStatementsAgainstTheirOwnSource(t *testing.T) {
+	got, err := Transpile("SELECT JSON; SELECT []", DialectClickHouse, DialectClickHouse)
+	if err != nil {
+		t.Fatalf("transpile error: %v", err)
+	}
+	want := []string{"SELECT JSON", "SELECT []"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d statements, want %d", len(got), len(want))
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("statement %d = %q, want %q", index, got[index], want[index])
+		}
 	}
 }
 

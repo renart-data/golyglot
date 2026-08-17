@@ -1,4 +1,4 @@
-.PHONY: test fmt-check test-cgo-free test-race ci release-check test-polyglot test-polyglot-full test-polyglot-oracle test-polyglot-identity fetch-polyglot-ffi fixtures bench-golyglot bench-polyglot bench-polyglot-transpile docs-install docs-dev docs-build
+.PHONY: test fmt-check test-cgo-free test-race ci release-check test-polyglot test-polyglot-full test-polyglot-ffi-extended test-polyglot-oracle test-polyglot-identity fetch-polyglot-ffi fixtures bench-golyglot bench-polyglot-ffi bench-polyglot bench-polyglot-transpile docs-install docs-dev docs-build
 
 POLYGLOT_REF ?= d5aa0d493c281398c9fdbc6febd3577f10ceac2f
 POLYGLOT_CACHE ?= .cache/polyglot
@@ -10,6 +10,8 @@ POLYGLOT_FFI_CACHE ?= .cache/polyglot-release
 POLYGLOT_FFI_ARCHIVE ?= $(POLYGLOT_FFI_CACHE)/$(POLYGLOT_FFI_VERSION)/polyglot-sql-ffi-$(POLYGLOT_FFI_PLATFORM).tar.gz
 POLYGLOT_FFI_DIR ?= $(POLYGLOT_FFI_CACHE)/$(POLYGLOT_FFI_VERSION)/polyglot-sql-ffi-$(POLYGLOT_FFI_PLATFORM)
 POLYGLOT_FFI_PATH ?= $(POLYGLOT_FFI_DIR)/libpolyglot_sql_ffi.so
+POLYGLOT_FFI_BENCH_BIN ?= .cache/polyglot-ffi-bench
+POLYGLOT_FFI_FIXTURE_MANIFEST ?= benchmarks/fixture_cases.json
 POLYGLOT_BENCH_ENV ?= CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16
 POLYGLOT_BENCH_PROFILE ?= dev
 
@@ -33,6 +35,7 @@ ci: fmt-check
 	CGO_ENABLED=0 go vet ./...
 	CGO_ENABLED=0 go build ./...
 	go test -race ./...
+	$(MAKE) test-polyglot-full
 
 release-check: ci
 
@@ -42,8 +45,12 @@ test-polyglot:
 test-polyglot-full:
 	GOMAXPROCS=2 CGO_ENABLED=0 GOLYGLOT_FULL_FIXTURES=1 go test -p 1 -run '^TestSQLGlotFullFixtures$$' -count=1 ./...
 
-test-polyglot-oracle:
+test-polyglot-ffi-extended:
 	python3 tools/polyglot_ffi_oracle.py --library "$(POLYGLOT_FFI_PATH)"
+
+# Backward-compatible alias. This is an extended public-FFI comparison, not
+# the pass rate of Polyglot's narrower tagged Rust compatibility suite.
+test-polyglot-oracle: test-polyglot-ffi-extended
 
 test-polyglot-identity:
 	go test -run '^TestSQLGlotIdentityFixtures$$' -count=1 ./...
@@ -69,7 +76,7 @@ fixtures:
 	@cp -R "$(POLYGLOT_CACHE)/crates/polyglot-sql/tests/custom_fixtures/datafusion/." "$(POLYGLOT_CUSTOM_FIXTURES)/datafusion/"
 
 # Download the pinned Linux x86_64 release artifact used by the optional
-# versioned oracle. This target never installs or links it into golyglot.
+# versioned FFI comparison. This target never installs or links it into golyglot.
 fetch-polyglot-ffi:
 	@test "$(POLYGLOT_FFI_PLATFORM)" = linux-x86_64 || { echo "fetch-polyglot-ffi currently supports POLYGLOT_FFI_PLATFORM=linux-x86_64" >&2; exit 1; }
 	@mkdir -p "$(POLYGLOT_FFI_CACHE)/$(POLYGLOT_FFI_VERSION)"
@@ -84,6 +91,13 @@ fetch-polyglot-ffi:
 
 bench-golyglot:
 	go test ./benchmarks -run '^$$' -bench . -benchmem -count=5
+
+bench-polyglot-ffi:
+	@test -f "$(POLYGLOT_FFI_PATH)" || (echo "missing $(POLYGLOT_FFI_PATH); run make fetch-polyglot-ffi" && exit 1)
+	@mkdir -p "$(dir $(POLYGLOT_FFI_BENCH_BIN))"
+	$(CC) -O2 -std=c11 -Wall -Wextra -Wpedantic -Werror -I"$(POLYGLOT_FFI_DIR)" tools/polyglot_ffi_bench.c -L"$(POLYGLOT_FFI_DIR)" -lpolyglot_sql_ffi -o "$(POLYGLOT_FFI_BENCH_BIN)"
+	LD_LIBRARY_PATH="$(POLYGLOT_FFI_DIR):$${LD_LIBRARY_PATH:-}" "$(POLYGLOT_FFI_BENCH_BIN)"
+	LD_LIBRARY_PATH="$(POLYGLOT_FFI_DIR):$${LD_LIBRARY_PATH:-}" python3 tools/polyglot_ffi_fixture_bench.py --binary "$(POLYGLOT_FFI_BENCH_BIN)" --library "$(POLYGLOT_FFI_PATH)" --manifest "$(POLYGLOT_FFI_FIXTURE_MANIFEST)"
 
 bench-polyglot:
 	@test -d "$(POLYGLOT_CACHE)/.git" || (echo "missing $(POLYGLOT_CACHE); see benchmarks/README.md" && exit 1)

@@ -2,6 +2,7 @@ package golyglot
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -79,6 +80,9 @@ func (g generator) node(node Node) (string, error) {
 		return text, nil
 	case *CreateTableStmt:
 		if g.pretty {
+			if g.dialect == DialectClickHouse {
+				return g.prettyClickHouseCreateTableStmt(n)
+			}
 			return g.prettyCreateTableStmt(n)
 		}
 		text := "CREATE "
@@ -178,7 +182,11 @@ func (g generator) insertStmt(stmt *InsertStmt) (string, error) {
 				if err != nil {
 					return "", err
 				}
-				text += valueText
+				if g.dialect == DialectClickHouse {
+					text += "(" + valueText + ")"
+				} else {
+					text += valueText
+				}
 			}
 			text += ")"
 		}
@@ -196,7 +204,11 @@ func (g generator) insertStmt(stmt *InsertStmt) (string, error) {
 				text += " " + query
 			}
 		} else {
-			text += " " + query
+			if g.pretty {
+				text += "\n" + query
+			} else {
+				text += " " + query
+			}
 		}
 	}
 	if stmt.Tail != "" {
@@ -232,7 +244,14 @@ func (g generator) updateStmt(stmt *UpdateStmt) (string, error) {
 }
 
 func (g generator) deleteStmt(stmt *DeleteStmt) (string, error) {
-	text := "DELETE FROM " + generateIdentifiers(stmt.Table)
+	text := "DELETE "
+	if g.dialect != DialectBigQuery || stmt.HasFrom {
+		text += "FROM "
+	}
+	text += generateIdentifiers(stmt.Table)
+	if stmt.Alias != nil && g.dialect != DialectPresto && g.dialect != DialectTrino {
+		text += " AS " + generateIdentifier(*stmt.Alias)
+	}
 	if stmt.Where != nil {
 		where, err := g.expr(stmt.Where, 0)
 		if err != nil {
@@ -250,7 +269,7 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 	if stmt.RawQuery != "" {
 		return canonicalRawSQL(stmt.RawQuery), nil
 	}
-	if !g.pretty && g.dialect == DialectSnowflake && snowflakeSemanticViewNeedsPretty(stmt) {
+	if g.dialect == DialectSnowflake && snowflakeSemanticViewNeedsPretty(stmt) {
 		copyStmt := *stmt
 		copyStmt.From = append([]TableExpr(nil), stmt.From...)
 		table := copyStmt.From[0]
@@ -282,7 +301,7 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 	if len(stmt.ValuesRows) > 0 {
 		return g.valuesStmt(stmt)
 	}
-	if stmt.Top != nil && g.dialect != DialectTSQL && stmt.Limit == nil {
+	if stmt.Top != nil && g.dialect != DialectTSQL && g.dialect != DialectTeradata && g.dialect != DialectSnowflake && stmt.Limit == nil {
 		base := *stmt
 		base.Limit = stmt.Top
 		base.Top = nil
@@ -297,6 +316,7 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 		base.Limit = nil
 		base.Offset = nil
 		base.Fetch = nil
+		base.Tail = ""
 		text, err := g.selectStmt(&base)
 		if err != nil {
 			return "", err
@@ -310,6 +330,7 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 		base.Limit = nil
 		base.Offset = nil
 		base.Fetch = nil
+		base.Tail = ""
 		text, err := g.selectStmt(&base)
 		if err != nil {
 			return "", err
@@ -403,6 +424,10 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 			b.WriteString(query)
 			b.WriteByte(')')
 		}
+		if stmt.WithTail != "" {
+			b.WriteByte(' ')
+			b.WriteString(stmt.WithTail)
+		}
 		b.WriteByte(' ')
 	}
 	b.WriteString("SELECT")
@@ -420,7 +445,7 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 		b.WriteByte(' ')
 		b.WriteString(stmt.SelectModifier)
 	}
-	if stmt.Top != nil && g.dialect == DialectTSQL {
+	if stmt.Top != nil && (g.dialect == DialectTSQL || g.dialect == DialectTeradata || g.dialect == DialectSnowflake) {
 		top, err := g.expr(stmt.Top, 0)
 		if err != nil {
 			return "", err
@@ -484,7 +509,7 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 		}
 		for i, table := range stmt.From {
 			if i > 0 {
-				if g.dialect == DialectBigQuery || g.dialect == DialectDatabricks || g.dialect == DialectSpark {
+				if (g.dialect == DialectBigQuery && !stmt.commaUnnest) || g.dialect == DialectDatabricks || g.dialect == DialectSpark {
 					b.WriteString(" CROSS JOIN ")
 				} else {
 					b.WriteString(", ")
@@ -746,17 +771,6 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 		b.WriteByte(' ')
 		b.WriteString(right)
 	}
-	if g.dialect == DialectTSQL && g.indent == 0 && isTSQLForQueryTail(stmt.Tail) {
-		base := *stmt
-		base.Tail = ""
-		pretty := g
-		pretty.pretty = true
-		baseText, err := pretty.prettySelectStmt(&base)
-		if err != nil {
-			return "", err
-		}
-		return baseText + "\n" + formatTSQLForQueryTail(stmt.Tail), nil
-	}
 	if stmt.Tail != "" {
 		if g.pretty {
 			b.WriteString("\n")
@@ -934,6 +948,11 @@ func (g generator) prettySelectStmt(stmt *SelectStmt) (string, error) {
 			b.WriteString(prefix)
 			b.WriteByte(')')
 		}
+		if stmt.WithTail != "" {
+			b.WriteByte('\n')
+			b.WriteString(prefix)
+			b.WriteString(stmt.WithTail)
+		}
 		b.WriteByte('\n')
 	}
 	b.WriteString(prefix)
@@ -948,7 +967,7 @@ func (g generator) prettySelectStmt(stmt *SelectStmt) (string, error) {
 			b.WriteByte(')')
 		}
 	}
-	if stmt.Top != nil && g.dialect == DialectTSQL {
+	if stmt.Top != nil && (g.dialect == DialectTSQL || g.dialect == DialectTeradata || g.dialect == DialectSnowflake) {
 		top, err := g.expr(stmt.Top, 0)
 		if err != nil {
 			return "", err
@@ -1072,6 +1091,15 @@ func (g generator) prettySelectStmt(stmt *SelectStmt) (string, error) {
 			return "", err
 		}
 		b.WriteString(text)
+	}
+	if stmt.Tail != "" {
+		b.WriteByte('\n')
+		if g.dialect == DialectTSQL && isTSQLForQueryTail(stmt.Tail) {
+			b.WriteString(indentLines(formatTSQLForQueryTail(stmt.Tail), g.indent))
+		} else {
+			b.WriteString(prefix)
+			b.WriteString(strings.TrimSpace(stmt.Tail))
+		}
 	}
 	result := b.String()
 	return parenthesizeQuery(result, stmt), nil
@@ -1287,7 +1315,7 @@ func functionNeedsPrettyLayout(function *FunctionCallExpr) bool {
 }
 
 func (g generator) functionArgument(function *FunctionCallExpr, arg Expr) (string, error) {
-	if len(function.Name) == 1 && strings.EqualFold(function.Name[0].Text, "ARRAY") {
+	if len(function.Name) == 1 && (strings.EqualFold(function.Name[0].Text, "ARRAY") || (g.dialect == DialectMaterialize && (strings.EqualFold(function.Name[0].Text, "LIST") || strings.EqualFold(function.Name[0].Text, "MAP")))) {
 		if subquery, ok := arg.(*SubqueryExpr); ok && subquery.Query != nil && !subquery.Parenthesized {
 			return g.selectStmt(subquery.Query)
 		}
@@ -1514,6 +1542,255 @@ func (g generator) prettyCreateTableStmt(stmt *CreateTableStmt) (string, error) 
 	return b.String(), nil
 }
 
+func (g generator) prettyClickHouseCreateTableStmt(stmt *CreateTableStmt) (string, error) {
+	prefix := "CREATE "
+	if stmt.Materialized {
+		prefix += "MATERIALIZED "
+	}
+	if stmt.Temporary {
+		prefix += "TEMPORARY "
+	}
+	prefix += "TABLE "
+	if stmt.IfNotExists {
+		prefix += "IF NOT EXISTS "
+	}
+	prefix += generateIdentifiers(stmt.Name)
+
+	tail := strings.TrimSpace(stmt.Tail)
+	if tail == "" || !strings.HasPrefix(tail, "(") {
+		if tail != "" {
+			prefix += " " + tail
+		}
+		return prefix, nil
+	}
+	close := matchingParenIndex(tail, 0)
+	if close < 0 {
+		return prefix + " " + tail, nil
+	}
+	columns := splitTopLevelSQL(tail[1:close], ',')
+	var b strings.Builder
+	b.WriteString(prefix)
+	b.WriteString(" (\n")
+	for _, column := range columns {
+		column = strings.TrimSpace(column)
+		if column == "" {
+			continue
+		}
+		if b.Len() > len(prefix)+3 {
+			b.WriteString(",\n")
+		}
+		b.WriteString("  ")
+		b.WriteString(prettyClickHouseColumn(column))
+	}
+	b.WriteString("\n)")
+	if suffix := strings.TrimSpace(tail[close+1:]); suffix != "" {
+		b.WriteByte('\n')
+		b.WriteString(prettyClickHouseCreateSuffix(suffix))
+	}
+	return b.String(), nil
+}
+
+func prettyClickHouseColumn(column string) string {
+	column = strings.TrimSpace(column)
+	index := strings.IndexAny(column, " \t\r\n")
+	if index < 0 {
+		return canonicalClickHouseDDLType(column)
+	}
+	name := strings.TrimSpace(column[:index])
+	rest := strings.TrimSpace(column[index:])
+	typeText := rest
+	constraints := ""
+	if ttl := indexKeywordTopLevel(rest, "TTL"); ttl >= 0 {
+		typeText = strings.TrimSpace(rest[:ttl])
+		constraints = strings.TrimSpace(rest[ttl:])
+	}
+	result := name + " " + canonicalClickHouseDDLType(typeText)
+	if constraints != "" {
+		result += " " + prettyClickHouseDDLExpression(constraints)
+	}
+	return result
+}
+
+func canonicalClickHouseDDLType(text string) string {
+	text = strings.TrimSpace(text)
+	for _, replacement := range []struct{ from, to string }{
+		{"SIMPLEAGGREGATEFUNCTION", "SimpleAggregateFunction"},
+		{"AGGREGATEFUNCTION", "AggregateFunction"},
+		{"DATETIME64", "DateTime64"},
+		{"DATETIME", "DateTime"},
+		{"DATE32", "Date32"},
+		{"DATE", "Date"},
+		{"UINT64", "UInt64"},
+		{"UINT32", "UInt32"},
+		{"UINT16", "UInt16"},
+		{"UINT8", "UInt8"},
+		{"INT64", "Int64"},
+		{"INT32", "Int32"},
+		{"INT16", "Int16"},
+		{"INT8", "Int8"},
+		{"INT", "Int32"},
+		{"FLOAT64", "Float64"},
+		{"FLOAT32", "Float32"},
+		{"STRING", "String"},
+		{"FIXEDSTRING", "FixedString"},
+		{"ARRAY", "Array"},
+		{"MAP", "Map"},
+		{"TUPLE", "Tuple"},
+		{"NESTED", "Nested"},
+		{"ANY", "any"},
+		{"QUANTILES", "quantiles"},
+		{"SUM", "sum"},
+		{"COUNT", "count"},
+		{"MIN", "min"},
+		{"MAX", "max"},
+	} {
+		text = replaceSQLWordFold(text, replacement.from, replacement.to)
+	}
+	return text
+}
+
+func prettyClickHouseDDLExpression(text string) string {
+	text = strings.TrimSpace(text)
+	text = replaceAllFold(text, "toStartOfDay(", "dateTrunc('DAY', ")
+	text = quoteClickHouseIntervalNumbers(text)
+	return text
+}
+
+func quoteClickHouseIntervalNumbers(text string) string {
+	var b strings.Builder
+	for index := 0; index < len(text); {
+		if index+len("INTERVAL") <= len(text) && strings.EqualFold(text[index:index+len("INTERVAL")], "INTERVAL") && (index == 0 || !isIdentifierByte(text[index-1])) && (index+len("INTERVAL") == len(text) || !isIdentifierByte(text[index+len("INTERVAL")])) {
+			end := index + len("INTERVAL")
+			b.WriteString(text[index:end])
+			for end < len(text) && (text[end] == ' ' || text[end] == '\t') {
+				b.WriteByte(text[end])
+				end++
+			}
+			if end < len(text) && text[end] != '\'' {
+				numberEnd := end
+				for numberEnd < len(text) && ((text[numberEnd] >= '0' && text[numberEnd] <= '9') || text[numberEnd] == '.') {
+					numberEnd++
+				}
+				if numberEnd > end {
+					b.WriteByte('\'')
+					b.WriteString(text[end:numberEnd])
+					b.WriteByte('\'')
+					index = numberEnd
+					continue
+				}
+			}
+			index = end
+			continue
+		}
+		b.WriteByte(text[index])
+		index++
+	}
+	return b.String()
+}
+
+func prettyClickHouseCreateSuffix(suffix string) string {
+	suffix = strings.TrimSpace(canonicalRawSQL(suffix))
+	clauses := splitClickHouseCreateClauses(suffix)
+	lines := make([]string, 0, len(clauses))
+	for _, clause := range clauses {
+		upper := strings.ToUpper(strings.TrimSpace(clause))
+		switch {
+		case strings.HasPrefix(upper, "ENGINE"):
+			rest := strings.TrimSpace(strings.TrimSpace(clause)[len("ENGINE"):])
+			rest = strings.TrimSpace(strings.TrimPrefix(rest, "="))
+			lines = append(lines, "ENGINE="+rest)
+		case strings.HasPrefix(upper, "ORDER BY"):
+			lines = append(lines, prettyClickHouseOrderClause(clause))
+		case strings.HasPrefix(upper, "PRIMARY KEY") || strings.HasPrefix(upper, "PARTITION BY"):
+			lines = append(lines, prettyClickHouseDDLExpression(clause))
+		case strings.HasPrefix(upper, "TTL"):
+			lines = append(lines, prettyClickHouseMultilineClause("TTL", strings.TrimSpace(clause[len("TTL"):]))...)
+		case strings.HasPrefix(upper, "GROUP BY"):
+			lines = append(lines, prettyClickHouseMultilineClause("GROUP BY", strings.TrimSpace(clause[len("GROUP BY"):]))...)
+		case strings.HasPrefix(upper, "WHERE"):
+			lines = append(lines, prettyClickHouseMultilineClause("WHERE", strings.TrimSpace(clause[len("WHERE"):]))...)
+		case strings.HasPrefix(upper, "SETTINGS"):
+			lines = append(lines, prettyClickHouseMultilineClause("SETTINGS", strings.TrimSpace(clause[len("SETTINGS"):]))...)
+		case strings.HasPrefix(upper, "SET"):
+			lines = append(lines, prettyClickHouseMultilineClause("SET", strings.TrimSpace(clause[len("SET"):]))...)
+		default:
+			lines = append(lines, prettyClickHouseDDLExpression(clause))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func splitClickHouseCreateClauses(text string) []string {
+	keywords := []string{"ENGINE", "PARTITION BY", "ORDER BY", "PRIMARY KEY", "TTL", "GROUP BY", "SETTINGS", "SET", "WHERE"}
+	starts := make([]int, 0, len(keywords))
+	for _, keyword := range keywords {
+		if index := indexKeywordTopLevel(text, keyword); index >= 0 {
+			starts = append(starts, index)
+		}
+	}
+	sort.Ints(starts)
+	unique := starts[:0]
+	for _, start := range starts {
+		if len(unique) == 0 || unique[len(unique)-1] != start {
+			unique = append(unique, start)
+		}
+	}
+	if len(unique) == 0 {
+		return []string{strings.TrimSpace(text)}
+	}
+	clauses := make([]string, 0, len(unique))
+	if unique[0] > 0 {
+		if prefix := strings.TrimSpace(text[:unique[0]]); prefix != "" {
+			clauses = append(clauses, prefix)
+		}
+	}
+	for index, start := range unique {
+		end := len(text)
+		if index+1 < len(unique) {
+			end = unique[index+1]
+		}
+		if clause := strings.TrimSpace(text[start:end]); clause != "" {
+			clauses = append(clauses, clause)
+		}
+	}
+	return clauses
+}
+
+func prettyClickHouseOrderClause(clause string) string {
+	body := strings.TrimSpace(clause[len("ORDER BY"):])
+	if strings.HasPrefix(body, "(") && matchingParenIndex(body, 0) == len(body)-1 {
+		inner := strings.TrimSpace(body[1 : len(body)-1])
+		items := splitTopLevelSQL(inner, ',')
+		for index := range items {
+			items[index] = prettyClickHouseDDLExpression(items[index])
+		}
+		if len(items) == 1 && !strings.EqualFold(strings.TrimSpace(items[0]), "tuple()") {
+			return "ORDER BY (\n  " + items[0] + "\n)"
+		}
+		return "ORDER BY (" + strings.Join(items, ", ") + ")"
+	}
+	return "ORDER BY " + prettyClickHouseDDLExpression(body)
+}
+
+func prettyClickHouseMultilineClause(keyword, body string) []string {
+	body = prettyClickHouseDDLExpression(body)
+	items := splitTopLevelSQL(body, ',')
+	lines := []string{keyword}
+	for index := range items {
+		items[index] = strings.TrimSpace(items[index])
+		if keyword == "SETTINGS" || keyword == "SET" {
+			items[index] = strings.TrimSpace(strings.ReplaceAll(items[index], "=", " = "))
+			items[index] = strings.Join(strings.Fields(items[index]), " ")
+		}
+		if index+1 < len(items) {
+			lines = append(lines, "  "+items[index]+",")
+		} else {
+			lines = append(lines, "  "+items[index])
+		}
+	}
+	return lines
+}
+
 func prettyCreateColumn(column string) string {
 	column = strings.TrimSpace(column)
 	index := strings.IndexAny(column, " \t\r\n")
@@ -1537,11 +1814,170 @@ func (g generator) prettyRawStatement(raw string) (string, bool, error) {
 		return g.prettyInsertFirst(trimmed)
 	case strings.HasPrefix(upper, "MERGE INTO "):
 		return g.prettyMerge(trimmed)
+	case strings.HasPrefix(upper, "CREATE FUNCTION ") && g.dialect == DialectTSQL:
+		return g.prettyCreateFunction(trimmed)
+	case strings.HasPrefix(upper, "CREATE DICTIONARY ") && g.dialect == DialectClickHouse:
+		return g.prettyClickHouseDictionary(trimmed)
 	case strings.HasPrefix(upper, "ALTER TABLE "):
 		return g.prettyAlter(trimmed)
 	default:
 		return "", false, nil
 	}
+}
+
+func (g generator) prettyClickHouseDictionary(sql string) (string, bool, error) {
+	open := strings.IndexByte(sql, '(')
+	if open < 0 {
+		return sql, true, nil
+	}
+	close := matchingParenIndex(sql, open)
+	if close < 0 {
+		return sql, true, nil
+	}
+	header := strings.TrimSpace(sql[:open])
+	columns := splitTopLevelSQL(sql[open+1:close], ',')
+	var b strings.Builder
+	b.WriteString(header)
+	b.WriteString(" (\n")
+	for index, column := range columns {
+		if index > 0 {
+			b.WriteString(",\n")
+		}
+		b.WriteString("  ")
+		text := prettyClickHouseColumn(strings.TrimSpace(column))
+		text = replaceSQLWordFold(text, "Date", "DATE")
+		b.WriteString(text)
+	}
+	b.WriteString("\n)")
+	suffix := strings.TrimSpace(sql[close+1:])
+	if suffix == "" {
+		return b.String(), true, nil
+	}
+	clauses := splitClickHouseDictionaryClauses(suffix)
+	for _, clause := range clauses {
+		upper := strings.ToUpper(strings.TrimSpace(clause))
+		switch {
+		case strings.HasPrefix(upper, "PRIMARY KEY"):
+			body := strings.TrimSpace(clause[len("PRIMARY KEY"):])
+			if !strings.HasPrefix(body, "(") {
+				body = "(" + body + ")"
+			}
+			b.WriteString("\nPRIMARY KEY " + body)
+		case strings.HasPrefix(upper, "SOURCE"):
+			b.WriteString("\n" + prettyClickHouseDictionaryNestedClause("SOURCE", clause[len("SOURCE"):]))
+		case strings.HasPrefix(upper, "LAYOUT"):
+			b.WriteString("\n" + prettyClickHouseDictionaryNestedClause("LAYOUT", clause[len("LAYOUT"):]))
+		case strings.HasPrefix(upper, "LIFETIME"):
+			body := strings.TrimSpace(clause[len("LIFETIME"):])
+			if strings.HasPrefix(body, "(") && strings.HasSuffix(body, ")") {
+				inner := strings.TrimSpace(body[1 : len(body)-1])
+				if !strings.Contains(strings.ToUpper(inner), "MIN ") {
+					inner = "MIN 0 MAX " + inner
+				}
+				body = "(" + inner + ")"
+			}
+			b.WriteString("\nLIFETIME" + body)
+		default:
+			b.WriteString("\n" + strings.TrimSpace(clause))
+		}
+	}
+	return b.String(), true, nil
+}
+
+func splitClickHouseDictionaryClauses(text string) []string {
+	keywords := []string{"PRIMARY KEY", "SOURCE", "LAYOUT", "LIFETIME", "RANGE"}
+	starts := make([]int, 0, len(keywords))
+	for _, keyword := range keywords {
+		if index := indexKeywordTopLevel(text, keyword); index >= 0 {
+			starts = append(starts, index)
+		}
+	}
+	sort.Ints(starts)
+	if len(starts) == 0 {
+		return []string{strings.TrimSpace(text)}
+	}
+	clauses := make([]string, 0, len(starts))
+	for index, start := range starts {
+		end := len(text)
+		if index+1 < len(starts) {
+			end = starts[index+1]
+		}
+		if clause := strings.TrimSpace(text[start:end]); clause != "" {
+			clauses = append(clauses, clause)
+		}
+	}
+	return clauses
+}
+
+func prettyClickHouseDictionaryNestedClause(keyword, raw string) string {
+	body := strings.TrimSpace(raw)
+	if len(body) < 2 || body[0] != '(' || matchingParenIndex(body, 0) != len(body)-1 {
+		if keyword == "LAYOUT" && body != "" && !strings.HasSuffix(body, "()") {
+			body += "()"
+		}
+		return keyword + body
+	}
+	inner := strings.TrimSpace(body[1 : len(body)-1])
+	if keyword == "LAYOUT" {
+		if open := strings.IndexByte(inner, '('); open >= 0 && matchingParenIndex(inner, open) == len(inner)-1 {
+			name := strings.TrimSpace(inner[:open])
+			content := strings.TrimSpace(inner[open+1 : len(inner)-1])
+			if content == "" {
+				return keyword + "(" + name + "())"
+			}
+			return keyword + "(" + name + "(\n  " + content + "\n))"
+		}
+		return keyword + "(" + inner + "())"
+	}
+	if open := strings.IndexByte(inner, '('); open >= 0 && matchingParenIndex(inner, open) == len(inner)-1 {
+		name := strings.TrimSpace(inner[:open])
+		content := strings.TrimSpace(inner[open+1 : len(inner)-1])
+		return keyword + "(" + name + "(\n  " + content + "\n))"
+	}
+	return keyword + "(" + inner + ")"
+}
+
+func (g generator) prettyCreateFunction(sql string) (string, bool, error) {
+	open := strings.IndexByte(sql, '(')
+	if open < 0 {
+		return sql, true, nil
+	}
+	close := matchingParenIndex(sql, open)
+	if close < 0 {
+		return sql, true, nil
+	}
+	returnIndex := indexKeywordTopLevel(sql[close+1:], "RETURN")
+	if returnIndex < 0 {
+		return sql, true, nil
+	}
+	returnIndex += close + 1
+	params := splitTopLevelSQL(strings.TrimSpace(sql[open+1:close]), ',')
+	for index := range params {
+		params[index] = strings.TrimSpace(params[index])
+		params[index] = replaceSQLWordFold(params[index], "INT", "INTEGER")
+	}
+	querySQL := strings.TrimSpace(sql[returnIndex+len("RETURN"):])
+	query, err := g.prettyRawSelect(querySQL)
+	if err != nil {
+		return "", true, err
+	}
+	name := strings.TrimRight(strings.TrimSpace(sql[:open]), " 	")
+	var b strings.Builder
+	b.WriteString(name)
+	b.WriteString("(\n")
+	for index, parameter := range params {
+		if parameter == "" {
+			continue
+		}
+		if index > 0 {
+			b.WriteString(",\n")
+		}
+		b.WriteString(indentString(2))
+		b.WriteString(parameter)
+	}
+	b.WriteString("\n)\nRETURNS TABLE AS\nRETURN ")
+	b.WriteString(query)
+	return b.String(), true, nil
 }
 
 func (g generator) prettyInsertOverwrite(sql string) (string, bool, error) {
@@ -1881,6 +2317,10 @@ func (g generator) appendQueryTail(text string, stmt *SelectStmt) (string, error
 			b.WriteString(" ONLY")
 		}
 	}
+	if stmt.Tail != "" {
+		b.WriteByte(' ')
+		b.WriteString(strings.TrimSpace(stmt.Tail))
+	}
 	return b.String(), nil
 }
 
@@ -2054,10 +2494,14 @@ func (g generator) fromItem(item FromItem) (string, error) {
 	switch item := item.(type) {
 	case *TableName:
 		text := generateIdentifiers(item.Parts)
+		aliasBeforeTail := g.dialect == DialectDuckDB && item.Alias != nil && strings.HasPrefix(strings.ToUpper(strings.TrimSpace(item.Tail)), "AT ")
+		if aliasBeforeTail {
+			text += " AS " + generateIdentifier(*item.Alias)
+		}
 		if item.Tail != "" {
 			text += " " + strings.TrimSpace(item.Tail)
 		}
-		if item.Alias != nil {
+		if item.Alias != nil && !aliasBeforeTail {
 			if g.dialect == DialectOracle {
 				text += " " + generateIdentifier(*item.Alias)
 			} else if (g.dialect == DialectSpark || g.dialect == DialectDatabricks) && len(item.Parts) == 1 && strings.EqualFold(item.Parts[0].Text, "STREAM") {
@@ -2146,11 +2590,18 @@ func (g generator) fromItem(item FromItem) (string, error) {
 		return text, nil
 	case *TableFunctionFrom:
 		text := generateIdentifiers(item.Name)
+		if item.Lateral {
+			text = "LATERAL " + text
+		}
 		if g.dialect == DialectDataFusion && len(item.Name) == 1 && !item.Name[0].Quoted && strings.EqualFold(item.Name[0].Text, "UNNEST") {
 			text = "UNNEST"
 		}
 		if item.RawArgs != "" {
-			text += item.RawArgs
+			rawArgs := item.RawArgs
+			if g.pretty && g.dialect == DialectTSQL {
+				rawArgs = prettyTSQLTableFunctionArgs(rawArgs, g.indent)
+			}
+			text += rawArgs
 		} else {
 			text += "("
 			for i, arg := range item.Args {
@@ -2171,9 +2622,15 @@ func (g generator) fromItem(item FromItem) (string, error) {
 			text += " WITH OFFSET"
 		}
 		if item.Alias != nil {
-			text += " AS " + generateIdentifier(*item.Alias)
+			if g.dialect == DialectOracle {
+				text += " " + generateIdentifier(*item.Alias)
+			} else {
+				text += " AS " + generateIdentifier(*item.Alias)
+			}
 		}
-		if len(item.Columns) > 0 {
+		if item.ColumnsRaw != "" {
+			text += item.ColumnsRaw
+		} else if len(item.Columns) > 0 {
 			text += "("
 			for i, column := range item.Columns {
 				if i > 0 {
@@ -2186,6 +2643,14 @@ func (g generator) fromItem(item FromItem) (string, error) {
 		return text, nil
 	case *RawFrom:
 		text := item.Raw
+		if g.pretty && g.dialect == DialectTSQL {
+			if pretty, ok, err := g.prettyTSQLMergeFrom(text); ok || err != nil {
+				if err != nil {
+					return "", err
+				}
+				text = pretty
+			}
+		}
 		if normalized, ok := normalizeValuesFromRaw(text); ok {
 			text = normalized
 		}
@@ -2206,6 +2671,157 @@ func (g generator) fromItem(item FromItem) (string, error) {
 	default:
 		return "", fmt.Errorf("cannot generate unknown FROM item")
 	}
+}
+
+func (g generator) prettyTSQLMergeFrom(raw string) (string, bool, error) {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) < 2 || trimmed[0] != '(' || matchingParenIndex(trimmed, 0) != len(trimmed)-1 {
+		return raw, false, nil
+	}
+	merge := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+	if !strings.HasPrefix(strings.ToUpper(merge), "MERGE INTO ") {
+		return raw, false, nil
+	}
+	usingIndex := indexKeywordTopLevel(merge, "USING")
+	onIndex := indexKeywordTopLevel(merge, "ON")
+	whenIndex := indexKeywordTopLevel(merge, "WHEN")
+	if usingIndex < 0 || onIndex < 0 || whenIndex < 0 || usingIndex >= onIndex || onIndex >= whenIndex {
+		return raw, false, nil
+	}
+	open := usingIndex + len("USING")
+	for open < len(merge) && (merge[open] == ' ' || merge[open] == '\t') {
+		open++
+	}
+	if open >= len(merge) || merge[open] != '(' {
+		return raw, false, nil
+	}
+	close := matchingParenIndex(merge, open)
+	if close < 0 || close > onIndex {
+		return raw, false, nil
+	}
+	innerSQL := strings.TrimSpace(merge[open+1 : close])
+	inner, err := g.prettyRawSelect(innerSQL)
+	if err != nil {
+		return "", true, err
+	}
+	inner = prettyTSQLJoinConditions(inner)
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(merge[:usingIndex]))
+	b.WriteString("\nUSING (\n")
+	b.WriteString(indentLines(inner, 1))
+	b.WriteString("\n)")
+	b.WriteByte(' ')
+	b.WriteString(strings.TrimSpace(merge[close+1 : onIndex]))
+	b.WriteByte('\n')
+	b.WriteString(strings.TrimSpace(merge[onIndex:whenIndex]))
+	tail := strings.TrimSpace(merge[whenIndex:])
+	for _, clause := range splitTopLevelKeyword(tail, "WHEN") {
+		clause = strings.TrimSpace(clause)
+		if clause == "" {
+			continue
+		}
+		if outputIndex := indexKeywordTopLevel(clause, "OUTPUT"); outputIndex >= 0 {
+			output := strings.TrimSpace(clause[outputIndex:])
+			clause = strings.TrimSpace(clause[:outputIndex])
+			if clause != "" {
+				b.WriteByte('\n')
+				b.WriteString(clause)
+			}
+			b.WriteByte('\n')
+			b.WriteString(output)
+			continue
+		}
+		if setIndex := indexKeywordTopLevel(clause, "SET"); setIndex >= 0 {
+			b.WriteByte('\n')
+			b.WriteString(strings.TrimSpace(clause[:setIndex+len("SET")]))
+			assignments := splitTopLevelSQL(strings.TrimSpace(clause[setIndex+len("SET"):]), ',')
+			for index, assignment := range assignments {
+				assignment = strings.TrimSpace(assignment)
+				if assignment == "" {
+					continue
+				}
+				b.WriteByte('\n')
+				b.WriteString(indentString(1))
+				b.WriteString(assignment)
+				if index+1 < len(assignments) {
+					b.WriteByte(',')
+				}
+			}
+			continue
+		}
+		b.WriteByte('\n')
+		b.WriteString(clause)
+	}
+	return "(\n" + indentLines(b.String(), 1) + "\n)", true, nil
+}
+
+func prettyTSQLJoinConditions(sql string) string {
+	lines := strings.Split(sql, "\n")
+	result := make([]string, 0, len(lines))
+	for _, line := range lines {
+		onIndex := indexKeywordTopLevel(line, "ON")
+		if onIndex < 0 || !strings.Contains(strings.ToUpper(line[onIndex+len("ON"):]), " AND ") {
+			result = append(result, line)
+			continue
+		}
+		prefix := line[:onIndex+len("ON")]
+		condition := strings.TrimSpace(line[onIndex+len("ON"):])
+		parts := splitTSQLJoinCondition(condition)
+		if len(parts) == 1 {
+			result = append(result, line)
+			continue
+		}
+		result = append(result, prefix+" "+strings.TrimSpace(parts[0]))
+		indent := line[:onIndex]
+		for _, part := range parts[1:] {
+			result = append(result, indent+strings.TrimSpace(part))
+		}
+	}
+	return strings.Join(result, "\n")
+}
+
+func splitTSQLJoinCondition(condition string) []string {
+	first := strings.ToUpper(condition)
+	start := 0
+	for {
+		relative := strings.Index(first[start:], " AND ")
+		if relative < 0 {
+			return []string{condition}
+		}
+		index := start + relative
+		if strings.Contains(first[start:index], " BETWEEN ") {
+			start = index + len(" AND ")
+			continue
+		}
+		return []string{condition[:index], "AND " + condition[index+len(" AND "):]}
+	}
+}
+
+func prettyTSQLTableFunctionArgs(raw string, indent int) string {
+	withIndex := indexKeywordTopLevel(raw, "WITH")
+	if withIndex < 0 {
+		return raw
+	}
+	open := strings.IndexByte(raw[withIndex+len("WITH"):], '(')
+	if open < 0 {
+		return raw
+	}
+	open += withIndex + len("WITH")
+	close := matchingParenIndex(raw, open)
+	if close < 0 {
+		return raw
+	}
+	inner := strings.TrimSpace(raw[open+1 : close])
+	if inner == "" {
+		return raw
+	}
+	parts := splitTopLevelSQL(inner, ',')
+	for index := range parts {
+		parts[index] = strings.TrimSpace(parts[index])
+	}
+	bodyIndent := indentString(indent + 2)
+	closeIndent := indentString(indent)
+	return strings.TrimRight(raw[:withIndex+len("WITH")], " \t") + " (\n" + bodyIndent + strings.Join(parts, ",\n"+bodyIndent) + "\n" + closeIndent + ")" + raw[close+1:]
 }
 
 func normalizeValuesFromRaw(raw string) (string, bool) {
@@ -2308,6 +2924,9 @@ func (g generator) expr(expression Expr, parentPrecedence int) (string, error) {
 		if expression.Operator == "+" {
 			text = right
 		} else if strings.EqualFold(expression.Operator, "NOT") {
+			if binary, ok := expression.Expr.(*BinaryExpr); ok && (binary.Operator == "->" || binary.Operator == "->>") && !strings.HasPrefix(right, "(") {
+				right = "(" + right + ")"
+			}
 			text = "NOT " + right
 		} else if len(right) > 0 && strings.ContainsRune("+-~", rune(right[0])) {
 			// Keep adjacent symbolic unary operators unambiguous while avoiding
@@ -2405,6 +3024,10 @@ func (g generator) expr(expression Expr, parentPrecedence int) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if raw, ok := expression.Right.(*RawExpr); ok && raw.Raw == "" {
+			text = value + " " + expression.Operator
+			break
+		}
 		right, err := g.expr(expression.Right, precedence+1)
 		if err != nil {
 			return "", err
@@ -2415,14 +3038,14 @@ func (g generator) expr(expression Expr, parentPrecedence int) (string, error) {
 			return g.prettyFunctionCall(expression, parentPrecedence)
 		}
 		text = generateFunctionName(expression.Name)
-		if g.pretty && len(expression.Name) > 0 && !expression.Name[len(expression.Name)-1].Quoted {
+		if g.pretty && g.dialect != DialectClickHouse && len(expression.Name) > 0 && !expression.Name[len(expression.Name)-1].Quoted && !(g.dialect == DialectBigQuery && len(expression.Name) == 1 && isLowercaseFunctionName(expression.Name[0].Text)) {
 			parts := make([]Identifier, len(expression.Name))
 			copy(parts, expression.Name)
 			parts[len(parts)-1].Text = strings.ToUpper(parts[len(parts)-1].Text)
 			text = generateFunctionName(parts)
 		}
 		if expression.ArrayLiteral && arrayLiteralUsesBrackets(g.dialect) {
-			if g.dialect == DialectBigQuery && bigQueryArrayNeedsPrettyLayout(expression) {
+			if g.pretty && g.dialect == DialectBigQuery && bigQueryArrayNeedsPrettyLayout(expression) {
 				return g.bigQueryArrayLiteral(expression)
 			}
 			text = "["
@@ -2661,6 +3284,13 @@ func (g generator) expr(expression Expr, parentPrecedence int) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if g.dialect == DialectSingleStore && expression.Operator != "" {
+			text = value + " " + expression.Operator + " " + typeText
+			for _, suffix := range expression.TypeSuffix {
+				text += " " + generateIdentifier(suffix)
+			}
+			return text, nil
+		}
 		text = expression.Keyword + "(" + value + " AS " + typeText
 		for _, suffix := range expression.TypeSuffix {
 			text += " " + generateIdentifier(suffix)
@@ -2886,7 +3516,13 @@ func (g generator) expr(expression Expr, parentPrecedence int) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		text = target + "." + generateIdentifier(expression.Field)
+		separator := "."
+		if g.dialect == DialectSnowflake {
+			if _, ok := expression.Target.(*CastExpr); ok {
+				separator = ":"
+			}
+		}
+		text = target + separator + generateIdentifier(expression.Field)
 	case *MissingExpr:
 		return "", fmt.Errorf("cannot generate recovered missing %s", expression.Expected)
 	case *ErrorExpr:
@@ -2901,6 +3537,18 @@ func (g generator) expr(expression Expr, parentPrecedence int) (string, error) {
 		return "(" + text + ")", nil
 	}
 	return text, nil
+}
+
+func isLowercaseFunctionName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, character := range name {
+		if character >= 'A' && character <= 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 func arrayLiteralUsesBrackets(dialect Dialect) bool {
@@ -3136,7 +3784,9 @@ func expressionPrecedence(expression Expr) int {
 			return 1
 		case "AND":
 			return 2
-		case "=", "<>", "!=", "<", "<=", ">", ">=", "~", "~*", "!~", "!~*", "~~", "~~~", "!~~", "!~~*", "@>", "<@", "&&", "^@", "<=>", "LIKE", "LIKE ANY", "ILIKE", "ILIKE ANY", "GLOB", "IN", "BETWEEN", "IS", "IS NOT", "OVERLAPS":
+		case "XOR":
+			return 3
+		case "=", "<>", "!=", "<", "<=", ">", ">=", "~", "~*", "!~", "!~*", "~~", "~~*", "~~~", "!~~", "!~~*", "@>", "@?", "@@", "?", "?&", "?|", "#-", "<<->>", "<->", "<@", "&&", "^@", "<=>", "LIKE", "LIKE ANY", "ILIKE", "ILIKE ANY", "SIMILAR TO", "GLOB", "IN", "BETWEEN", "IS", "IS NOT", "OVERLAPS":
 			return 3
 		case "COLLATE":
 			return 7
@@ -3185,6 +3835,8 @@ func generateIdentifier(identifier Identifier) string {
 		return "`" + strings.ReplaceAll(identifier.Text, "`", "``") + "`"
 	case '[':
 		return "[" + strings.ReplaceAll(identifier.Text, "]", "]]") + "]"
+	case '\'':
+		return "'" + strings.ReplaceAll(identifier.Text, "'", "''") + "'"
 	default:
 		return `"` + strings.ReplaceAll(identifier.Text, `"`, `""`) + `"`
 	}
