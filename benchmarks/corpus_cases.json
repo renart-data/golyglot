@@ -1,0 +1,460 @@
+{
+  "description": "Deterministic mapping-weighted sample of cross-dialect SQLGlot fixtures whose expected output is matched exactly by Golyglot and the released Polyglot FFI.",
+  "selection": {
+    "algorithm": "lowest SHA-256 over every eligible mapping",
+    "seed": "golyglot-corpus-v1",
+    "candidate_mappings": 4642,
+    "exact_match_mappings": 4495,
+    "sample_size": 64
+  },
+  "cases": [
+    {
+      "name": "bigquery_to_databricks_0238",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/bigquery.json",
+      "index": 238,
+      "target": "databricks"
+    },
+    {
+      "name": "bigquery_to_duckdb_0175",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/bigquery.json",
+      "index": 175,
+      "target": "duckdb"
+    },
+    {
+      "name": "bigquery_to_mysql_0051",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/bigquery.json",
+      "index": 51,
+      "target": "mysql"
+    },
+    {
+      "name": "bigquery_to_presto_0086",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/bigquery.json",
+      "index": 86,
+      "target": "presto"
+    },
+    {
+      "name": "bigquery_to_presto_0103",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/bigquery.json",
+      "index": 103,
+      "target": "presto"
+    },
+    {
+      "name": "doris_to_duckdb_0017",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/doris.json",
+      "index": 17,
+      "target": "duckdb"
+    },
+    {
+      "name": "duckdb_to_bigquery_0045",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/duckdb.json",
+      "index": 45,
+      "target": "bigquery"
+    },
+    {
+      "name": "duckdb_to_bigquery_0179",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/duckdb.json",
+      "index": 179,
+      "target": "bigquery"
+    },
+    {
+      "name": "duckdb_to_postgres_0100",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/duckdb.json",
+      "index": 100,
+      "target": "postgres"
+    },
+    {
+      "name": "generic_to_bigquery_0034",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 34,
+      "target": "bigquery"
+    },
+    {
+      "name": "generic_to_bigquery_0223",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 223,
+      "target": "bigquery"
+    },
+    {
+      "name": "generic_to_clickhouse_0103",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 103,
+      "target": "clickhouse"
+    },
+    {
+      "name": "generic_to_clickhouse_0207",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 207,
+      "target": "clickhouse"
+    },
+    {
+      "name": "generic_to_doris_0013",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 13,
+      "target": "doris"
+    },
+    {
+      "name": "generic_to_doris_0040",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 40,
+      "target": "doris"
+    },
+    {
+      "name": "generic_to_doris_0101",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 101,
+      "target": "doris"
+    },
+    {
+      "name": "generic_to_doris_0162",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 162,
+      "target": "doris"
+    },
+    {
+      "name": "generic_to_hive_0002",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 2,
+      "target": "hive"
+    },
+    {
+      "name": "generic_to_materialize_0140",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 140,
+      "target": "materialize"
+    },
+    {
+      "name": "generic_to_mysql_0220",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 220,
+      "target": "mysql"
+    },
+    {
+      "name": "generic_to_oracle_0224",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 224,
+      "target": "oracle"
+    },
+    {
+      "name": "generic_to_postgres_0038",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 38,
+      "target": "postgres"
+    },
+    {
+      "name": "generic_to_postgres_0044",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 44,
+      "target": "postgres"
+    },
+    {
+      "name": "generic_to_postgres_0173",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 173,
+      "target": "postgres"
+    },
+    {
+      "name": "generic_to_postgres_0249",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 249,
+      "target": "postgres"
+    },
+    {
+      "name": "generic_to_presto_0050",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 50,
+      "target": "presto"
+    },
+    {
+      "name": "generic_to_snowflake_0034",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 34,
+      "target": "snowflake"
+    },
+    {
+      "name": "generic_to_snowflake_0103",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 103,
+      "target": "snowflake"
+    },
+    {
+      "name": "generic_to_spark_0155",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 155,
+      "target": "spark"
+    },
+    {
+      "name": "generic_to_sqlite_0001",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 1,
+      "target": "sqlite"
+    },
+    {
+      "name": "generic_to_sqlite_0177",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/generic.json",
+      "index": 177,
+      "target": "sqlite"
+    },
+    {
+      "name": "hive_to_databricks_0083",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/hive.json",
+      "index": 83,
+      "target": "databricks"
+    },
+    {
+      "name": "hive_to_duckdb_0068",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/hive.json",
+      "index": 68,
+      "target": "duckdb"
+    },
+    {
+      "name": "hive_to_spark_0019",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/hive.json",
+      "index": 19,
+      "target": "spark"
+    },
+    {
+      "name": "hive_to_spark_0024",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/hive.json",
+      "index": 24,
+      "target": "spark"
+    },
+    {
+      "name": "mysql_to_clickhouse_0007",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/mysql.json",
+      "index": 7,
+      "target": "clickhouse"
+    },
+    {
+      "name": "mysql_to_postgres_0082",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/mysql.json",
+      "index": 82,
+      "target": "postgres"
+    },
+    {
+      "name": "mysql_to_postgres_0087",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/mysql.json",
+      "index": 87,
+      "target": "postgres"
+    },
+    {
+      "name": "oracle_to_bigquery_0009",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/oracle.json",
+      "index": 9,
+      "target": "bigquery"
+    },
+    {
+      "name": "postgres_to_doris_0068",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/postgres.json",
+      "index": 68,
+      "target": "doris"
+    },
+    {
+      "name": "postgres_to_duckdb_0065",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/postgres.json",
+      "index": 65,
+      "target": "duckdb"
+    },
+    {
+      "name": "postgres_to_duckdb_0078",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/postgres.json",
+      "index": 78,
+      "target": "duckdb"
+    },
+    {
+      "name": "postgres_to_tsql_0038",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/postgres.json",
+      "index": 38,
+      "target": "tsql"
+    },
+    {
+      "name": "presto_to_redshift_0079",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/presto.json",
+      "index": 79,
+      "target": "redshift"
+    },
+    {
+      "name": "presto_to_spark_0067",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/presto.json",
+      "index": 67,
+      "target": "spark"
+    },
+    {
+      "name": "redshift_to_bigquery_0032",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/redshift.json",
+      "index": 32,
+      "target": "bigquery"
+    },
+    {
+      "name": "redshift_to_oracle_0028",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/redshift.json",
+      "index": 28,
+      "target": "oracle"
+    },
+    {
+      "name": "redshift_to_tableau_0027",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/redshift.json",
+      "index": 27,
+      "target": "tableau"
+    },
+    {
+      "name": "snowflake_to_duckdb_0244",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/snowflake.json",
+      "index": 244,
+      "target": "duckdb"
+    },
+    {
+      "name": "snowflake_to_duckdb_0270",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/snowflake.json",
+      "index": 270,
+      "target": "duckdb"
+    },
+    {
+      "name": "snowflake_to_duckdb_0289",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/snowflake.json",
+      "index": 289,
+      "target": "duckdb"
+    },
+    {
+      "name": "snowflake_to_duckdb_0347",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/snowflake.json",
+      "index": 347,
+      "target": "duckdb"
+    },
+    {
+      "name": "snowflake_to_postgres_0143",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/snowflake.json",
+      "index": 143,
+      "target": "postgres"
+    },
+    {
+      "name": "spark_to_bigquery_0112",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/spark.json",
+      "index": 112,
+      "target": "bigquery"
+    },
+    {
+      "name": "spark_to_duckdb_0031",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/spark.json",
+      "index": 31,
+      "target": "duckdb"
+    },
+    {
+      "name": "spark_to_duckdb_0081",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/spark.json",
+      "index": 81,
+      "target": "duckdb"
+    },
+    {
+      "name": "spark_to_hive_0001",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/spark.json",
+      "index": 1,
+      "target": "hive"
+    },
+    {
+      "name": "spark_to_spark2_0030",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/spark.json",
+      "index": 30,
+      "target": "spark2"
+    },
+    {
+      "name": "tsql_to_postgres_0120",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/tsql.json",
+      "index": 120,
+      "target": "postgres"
+    },
+    {
+      "name": "tsql_to_postgres_0155",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/tsql.json",
+      "index": 155,
+      "target": "postgres"
+    },
+    {
+      "name": "tsql_to_redshift_0171",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/tsql.json",
+      "index": 171,
+      "target": "redshift"
+    },
+    {
+      "name": "tsql_to_snowflake_0033",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/tsql.json",
+      "index": 33,
+      "target": "snowflake"
+    },
+    {
+      "name": "tsql_to_spark_0066",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/tsql.json",
+      "index": 66,
+      "target": "spark"
+    },
+    {
+      "name": "tsql_to_spark_0105",
+      "feature": "deterministic cross-dialect corpus sample",
+      "fixture": "dialects/tsql.json",
+      "index": 105,
+      "target": "spark"
+    }
+  ]
+}

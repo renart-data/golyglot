@@ -1,4 +1,4 @@
-.PHONY: test fmt-check test-cgo-free test-race ci release-check test-polyglot test-polyglot-full test-polyglot-ffi-extended test-polyglot-oracle test-polyglot-identity fetch-polyglot-ffi fixtures bench-golyglot bench-polyglot-ffi bench-polyglot bench-polyglot-transpile docs-install docs-dev docs-build
+.PHONY: test test-tools fmt-check test-cgo-free test-race ci release-check test-polyglot test-polyglot-full test-polyglot-ffi-extended test-polyglot-oracle test-polyglot-identity fetch-polyglot-ffi fixtures select-benchmark-corpus bench-golyglot bench-golyglot-corpus bench-workload bench-polyglot-ffi bench-polyglot-ffi-corpus bench-polyglot bench-polyglot-transpile docs-install docs-dev docs-build
 
 POLYGLOT_REF ?= d5aa0d493c281398c9fdbc6febd3577f10ceac2f
 POLYGLOT_CACHE ?= .cache/polyglot
@@ -12,11 +12,22 @@ POLYGLOT_FFI_DIR ?= $(POLYGLOT_FFI_CACHE)/$(POLYGLOT_FFI_VERSION)/polyglot-sql-f
 POLYGLOT_FFI_PATH ?= $(POLYGLOT_FFI_DIR)/libpolyglot_sql_ffi.so
 POLYGLOT_FFI_BENCH_BIN ?= .cache/polyglot-ffi-bench
 POLYGLOT_FFI_FIXTURE_MANIFEST ?= benchmarks/fixture_cases.json
+POLYGLOT_FFI_CORPUS_MANIFEST ?= benchmarks/corpus_cases.json
 POLYGLOT_BENCH_ENV ?= CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16
 POLYGLOT_BENCH_PROFILE ?= dev
+BENCH_COUNT ?= 5
+BENCH_TIME ?= 1s
+CORPUS_BENCH_COUNT ?= 3
+CORPUS_BENCH_TIME ?= 250ms
+CORPUS_FFI_BENCH_DURATION_MS ?= 250
+BENCH_WORKLOAD ?=
 
 test:
 	go test ./...
+
+test-tools:
+	python3 -m unittest discover -s tools -p 'test_*.py'
+	python3 -m py_compile tools/polyglot_ffi_oracle.py tools/polyglot_ffi_fixture_bench.py tools/select_polyglot_benchmark_cases.py tools/compare_benchmarks.py
 
 fmt-check:
 	test -z "$$(gofmt -l .)"
@@ -29,7 +40,7 @@ test-cgo-free:
 test-race:
 	go test -race ./...
 
-ci: fmt-check
+ci: fmt-check test-tools
 	go test ./...
 	CGO_ENABLED=0 go test ./...
 	CGO_ENABLED=0 go vet ./...
@@ -89,8 +100,19 @@ fetch-polyglot-ffi:
 	test "$$actual" = "$$expected" || { echo "checksum mismatch for $(POLYGLOT_FFI_ARCHIVE)" >&2; exit 1; }
 	@tar -xzf "$(POLYGLOT_FFI_ARCHIVE)" -C "$(POLYGLOT_FFI_CACHE)/$(POLYGLOT_FFI_VERSION)"
 
+select-benchmark-corpus:
+	@test -f "$(POLYGLOT_FFI_PATH)" || (echo "missing $(POLYGLOT_FFI_PATH); run make fetch-polyglot-ffi" && exit 1)
+	python3 tools/select_polyglot_benchmark_cases.py --library "$(POLYGLOT_FFI_PATH)" --output "$(POLYGLOT_FFI_CORPUS_MANIFEST)"
+
 bench-golyglot:
-	go test ./benchmarks -run '^$$' -bench . -benchmem -count=5
+	go test ./benchmarks -run '^$$' -bench '^(BenchmarkParse|BenchmarkTranspile|BenchmarkFormat|BenchmarkFixtureTranspile)$$' -benchmem -count="$(BENCH_COUNT)" -benchtime="$(BENCH_TIME)"
+
+bench-golyglot-corpus:
+	go test ./benchmarks -run '^$$' -bench '^BenchmarkCorpusTranspile$$' -benchmem -count="$(CORPUS_BENCH_COUNT)" -benchtime="$(CORPUS_BENCH_TIME)"
+
+bench-workload:
+	@test -n "$(BENCH_WORKLOAD)" || (echo "set BENCH_WORKLOAD=/path/to/workload.json" && exit 1)
+	GOLYGLOT_BENCH_WORKLOAD="$(abspath $(BENCH_WORKLOAD))" go test ./benchmarks -run '^$$' -bench '^BenchmarkWorkload$$' -benchmem -count="$(BENCH_COUNT)" -benchtime="$(BENCH_TIME)"
 
 bench-polyglot-ffi:
 	@test -f "$(POLYGLOT_FFI_PATH)" || (echo "missing $(POLYGLOT_FFI_PATH); run make fetch-polyglot-ffi" && exit 1)
@@ -98,6 +120,12 @@ bench-polyglot-ffi:
 	$(CC) -O2 -std=c11 -Wall -Wextra -Wpedantic -Werror -I"$(POLYGLOT_FFI_DIR)" tools/polyglot_ffi_bench.c -L"$(POLYGLOT_FFI_DIR)" -lpolyglot_sql_ffi -o "$(POLYGLOT_FFI_BENCH_BIN)"
 	LD_LIBRARY_PATH="$(POLYGLOT_FFI_DIR):$${LD_LIBRARY_PATH:-}" "$(POLYGLOT_FFI_BENCH_BIN)"
 	LD_LIBRARY_PATH="$(POLYGLOT_FFI_DIR):$${LD_LIBRARY_PATH:-}" python3 tools/polyglot_ffi_fixture_bench.py --binary "$(POLYGLOT_FFI_BENCH_BIN)" --library "$(POLYGLOT_FFI_PATH)" --manifest "$(POLYGLOT_FFI_FIXTURE_MANIFEST)"
+
+bench-polyglot-ffi-corpus:
+	@test -f "$(POLYGLOT_FFI_PATH)" || (echo "missing $(POLYGLOT_FFI_PATH); run make fetch-polyglot-ffi" && exit 1)
+	@mkdir -p "$(dir $(POLYGLOT_FFI_BENCH_BIN))"
+	$(CC) -O2 -std=c11 -Wall -Wextra -Wpedantic -Werror -I"$(POLYGLOT_FFI_DIR)" tools/polyglot_ffi_bench.c -L"$(POLYGLOT_FFI_DIR)" -lpolyglot_sql_ffi -o "$(POLYGLOT_FFI_BENCH_BIN)"
+	POLYGLOT_BENCH_SAMPLES="$(CORPUS_BENCH_COUNT)" POLYGLOT_BENCH_DURATION_MS="$(CORPUS_FFI_BENCH_DURATION_MS)" LD_LIBRARY_PATH="$(POLYGLOT_FFI_DIR):$${LD_LIBRARY_PATH:-}" python3 tools/polyglot_ffi_fixture_bench.py --binary "$(POLYGLOT_FFI_BENCH_BIN)" --library "$(POLYGLOT_FFI_PATH)" --manifest "$(POLYGLOT_FFI_CORPUS_MANIFEST)"
 
 bench-polyglot:
 	@test -d "$(POLYGLOT_CACHE)/.git" || (echo "missing $(POLYGLOT_CACHE); see benchmarks/README.md" && exit 1)

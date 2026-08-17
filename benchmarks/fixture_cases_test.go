@@ -11,7 +11,10 @@ import (
 	"github.com/tobilg/golyglot"
 )
 
-const fixtureBenchmarkManifestPath = "fixture_cases.json"
+const (
+	fixtureBenchmarkManifestPath = "fixture_cases.json"
+	corpusBenchmarkManifestPath  = "corpus_cases.json"
+)
 
 type fixtureBenchmarkManifest struct {
 	Cases []fixtureBenchmarkReference `json:"cases"`
@@ -44,11 +47,11 @@ type fixtureBenchmarkCase struct {
 
 var fixtureBenchmarkOutputSink string
 
-func loadFixtureBenchmarkCases() ([]fixtureBenchmarkCase, error) {
-	manifestPath := fixtureBenchmarkManifestPath
+func loadFixtureBenchmarkCases(requestedManifestPath string) ([]fixtureBenchmarkCase, error) {
+	manifestPath := requestedManifestPath
 	manifestData, err := os.ReadFile(manifestPath)
 	if os.IsNotExist(err) {
-		manifestPath = filepath.Join("benchmarks", fixtureBenchmarkManifestPath)
+		manifestPath = filepath.Join("benchmarks", requestedManifestPath)
 		manifestData, err = os.ReadFile(manifestPath)
 	}
 	if err != nil {
@@ -119,7 +122,16 @@ func loadFixtureBenchmarkCases() ([]fixtureBenchmarkCase, error) {
 }
 
 func TestFixtureBenchmarkCasesMatch(t *testing.T) {
-	cases, err := loadFixtureBenchmarkCases()
+	testFixtureBenchmarkCasesMatch(t, fixtureBenchmarkManifestPath)
+}
+
+func TestCorpusBenchmarkCasesMatch(t *testing.T) {
+	testFixtureBenchmarkCasesMatch(t, corpusBenchmarkManifestPath)
+}
+
+func testFixtureBenchmarkCasesMatch(t *testing.T, manifestPath string) {
+	t.Helper()
+	cases, err := loadFixtureBenchmarkCases(manifestPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +149,16 @@ func TestFixtureBenchmarkCasesMatch(t *testing.T) {
 }
 
 func BenchmarkFixtureTranspile(b *testing.B) {
-	cases, err := loadFixtureBenchmarkCases()
+	benchmarkFixtureTranspile(b, fixtureBenchmarkManifestPath)
+}
+
+func BenchmarkCorpusTranspile(b *testing.B) {
+	benchmarkFixtureTranspile(b, corpusBenchmarkManifestPath)
+}
+
+func benchmarkFixtureTranspile(b *testing.B, manifestPath string) {
+	b.Helper()
+	cases, err := loadFixtureBenchmarkCases(manifestPath)
 	if err != nil {
 		b.Fatal(err)
 	}

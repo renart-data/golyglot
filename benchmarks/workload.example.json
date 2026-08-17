@@ -1,0 +1,19 @@
+{
+  "description": "Example schema for an uncommitted, anonymized workload manifest.",
+  "cases": [
+    {
+      "name": "parse_dashboard_query",
+      "operation": "parse",
+      "source": "postgres",
+      "sql": "SELECT customer_id, SUM(total) FROM orders GROUP BY customer_id"
+    },
+    {
+      "name": "transpile_dashboard_query",
+      "operation": "transpile",
+      "source": "postgres",
+      "target": "mysql",
+      "sql": "SELECT customer_id, SUM(total) FROM orders GROUP BY customer_id",
+      "expected": "SELECT customer_id, SUM(total) FROM orders GROUP BY customer_id"
+    }
+  ]
+}

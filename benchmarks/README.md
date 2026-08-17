@@ -12,8 +12,13 @@ not the original cgo/FFI client.
 ## Go
 
 ```sh
-go test ./benchmarks -run '^$' -bench . -benchmem -count=5
+make bench-golyglot
 ```
+
+`BENCH_COUNT` and `BENCH_TIME` control the sample count and duration. The
+default target includes the synthetic and 12 manually stratified cases, but
+keeps the larger corpus sample separate so an ordinary run remains reasonably
+short.
 
 ## Released Polyglot shared library
 
@@ -76,6 +81,65 @@ stratifying by feature makes the results useful for comparing implementation
 cost on shared behavior, but it does not estimate either project's speed over
 the full corpus or a production workload distribution.
 
+## Deterministic corpus sample
+
+`corpus_cases.json` is a separate 64-case mapping-weighted sample. Its
+selection population is every cross-dialect `write` mapping in the checked-in
+dialect fixtures for which Golyglot and released Polyglot v0.9.1 both produce
+the exact expected output. Each eligible mapping gets one SHA-256 rank under a
+fixed seed, and the lowest 64 ranks are selected. The checked-in sample was
+drawn from 4,495 exact matches among 4,642 candidate mappings and covers 13
+source dialects and 17 targets.
+
+Run both implementations with shorter defaults appropriate for the broader
+set:
+
+```sh
+make bench-golyglot-corpus
+make bench-polyglot-ffi-corpus
+```
+
+Tune the Go run with `CORPUS_BENCH_COUNT` and `CORPUS_BENCH_TIME`; tune the FFI
+run with `CORPUS_BENCH_COUNT` and `CORPUS_FFI_BENCH_DURATION_MS`. Regenerate
+the manifest after intentionally changing the fixture or Polyglot version:
+
+```sh
+make select-benchmark-corpus
+```
+
+The generated manifest records its seed and population sizes. Review those
+metadata and the selected-case diff when regenerating it. This is closer to a
+corpus-weighted comparison than the hand-stratified set, but it is still not a
+substitute for a private workload made from anonymized production queries.
+
+For that production-shaped measurement, copy `workload.example.json` outside
+the repository, replace its SQL with anonymized queries, and run:
+
+```sh
+make bench-workload BENCH_WORKLOAD=/secure/path/workload.json
+```
+
+Workload entries support `parse`, `format`, and `transpile`. `source` defaults
+to `generic`; transpilation also requires `target`. An optional `expected`
+value is checked before timing so a benchmark cannot silently measure the
+wrong output. The manifest path is passed through the environment and its SQL
+does not need to be committed.
+
+## Comparing revisions
+
+`tools/compare_benchmarks.py` compares the median `ns/op` values in two Go
+benchmark outputs and emits a Markdown table:
+
+```sh
+python3 tools/compare_benchmarks.py baseline.txt current.txt
+python3 tools/compare_benchmarks.py baseline.txt current.txt \
+  --fail-regression-percent 10
+```
+
+Use at least three samples from the same machine. A threshold is useful on a
+stable dedicated runner, but should remain reporting-only on shared runners
+unless repeated measurements establish their normal variance.
+
 ## Original Polyglot
 
 The local checkout must be at the pinned revision:
@@ -102,6 +166,15 @@ make bench-polyglot-transpile
 
 It enables Polyglot's full benchmark profile and may need more memory than the
 parser-only target.
+
+The manually dispatched `.github/workflows/benchmarks.yml` workflow moves this
+memory-heavy work to GitHub Actions. It alternates five Go samples against a
+chosen baseline ref, uploads the raw results and comparison table, and can run
+both pinned Polyglot Criterion suites with two Cargo build jobs. The runner
+input defaults to `ubuntu-latest`; repositories with a configured larger
+runner can supply its label when dispatching the workflow. Criterion output,
+resource-usage logs, and generated reports are retained as workflow artifacts.
+The regression threshold defaults to zero, meaning report without failing.
 
 Polyglot's lineage suite is not wired into the default comparison: the Go
 public lineage API intentionally reparses SQL, so it should be reported

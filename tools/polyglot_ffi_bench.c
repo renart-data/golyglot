@@ -2,6 +2,7 @@
 
 /* Standalone C-ABI benchmark; this file is intentionally outside Go packages. */
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -175,6 +176,26 @@ static uint64_t monotonic_nanoseconds(void) {
     return (uint64_t)value.tv_sec * UINT64_C(1000000000) + (uint64_t)value.tv_nsec;
 }
 
+static uint64_t environment_uint64(
+    const char *name,
+    uint64_t default_value,
+    uint64_t minimum,
+    uint64_t maximum
+) {
+    const char *raw = getenv(name);
+    if (raw == NULL || raw[0] == '\0') {
+        return default_value;
+    }
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(raw, &end, 10);
+    if (errno != 0 || end == raw || *end != '\0' || value < minimum || value > maximum) {
+        fprintf(stderr, "%s must be an integer from %" PRIu64 " to %" PRIu64 "\n", name, minimum, maximum);
+        exit(EXIT_FAILURE);
+    }
+    return (uint64_t)value;
+}
+
 static polyglot_result_t invoke(const struct benchmark_case *benchmark) {
     switch (benchmark->operation) {
     case OP_PARSE:
@@ -218,9 +239,14 @@ static uint64_t run_iterations(const struct benchmark_case *benchmark, uint64_t 
     return monotonic_nanoseconds() - started;
 }
 
-static uint64_t calibrated_iterations(const struct benchmark_case *benchmark) {
-    const uint64_t calibration_time = UINT64_C(100000000);
-    const uint64_t sample_time = UINT64_C(1000000000);
+static uint64_t calibrated_iterations(
+    const struct benchmark_case *benchmark,
+    uint64_t sample_time
+) {
+    uint64_t calibration_time = sample_time / UINT64_C(10);
+    if (calibration_time < UINT64_C(1000000)) {
+        calibration_time = UINT64_C(1000000);
+    }
     uint64_t iterations = 1;
     uint64_t elapsed = 0;
 
@@ -239,13 +265,17 @@ static uint64_t calibrated_iterations(const struct benchmark_case *benchmark) {
 }
 
 static void run_benchmark(const struct benchmark_case *benchmark) {
-    const int samples = 5;
-    uint64_t iterations = calibrated_iterations(benchmark);
-    for (int sample = 1; sample <= samples; sample++) {
+    uint64_t samples = environment_uint64("POLYGLOT_BENCH_SAMPLES", 5, 1, 100);
+    uint64_t duration_ms = environment_uint64(
+        "POLYGLOT_BENCH_DURATION_MS", 1000, 1, 60000
+    );
+    uint64_t sample_time = duration_ms * UINT64_C(1000000);
+    uint64_t iterations = calibrated_iterations(benchmark, sample_time);
+    for (uint64_t sample = 1; sample <= samples; sample++) {
         uint64_t elapsed = run_iterations(benchmark, iterations);
         double nanoseconds_per_operation = (double)elapsed / (double)iterations;
         printf(
-            "PolyglotFFI/%s/%s sample=%d iterations=%" PRIu64 " bytes=%zu %.0f ns/op\n",
+            "PolyglotFFI/%s/%s sample=%" PRIu64 " iterations=%" PRIu64 " bytes=%zu %.0f ns/op\n",
             benchmark->operation_name,
             benchmark->case_name,
             sample,
