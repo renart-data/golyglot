@@ -1,0 +1,179 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: Git ref to compare against
+        required: true
+        default: main
+        type: string
+      runner:
+        description: GitHub-hosted or larger-runner label
+        required: true
+        default: ubuntu-latest
+        type: string
+      fail_regression_percent:
+        description: Optional median regression threshold; zero only reports
+        required: true
+        default: "0"
+        type: string
+      run_polyglot_core:
+        description: Compile and run the memory-heavy Polyglot Criterion suites
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmarks-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  go-benchmarks:
+    name: Go benchmark comparison
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Resolve baseline
+        env:
+          BASELINE_REF: ${{ inputs.baseline_ref }}
+        run: |
+          set -euo pipefail
+          if baseline_commit=$(git rev-parse --verify "${BASELINE_REF}^{commit}" 2>/dev/null); then
+            :
+          else
+            git fetch --no-tags origin "$BASELINE_REF"
+            baseline_commit=$(git rev-parse FETCH_HEAD)
+          fi
+          echo "BASELINE_COMMIT=$baseline_commit" >> "$GITHUB_ENV"
+          git worktree add --detach "$RUNNER_TEMP/golyglot-baseline" "$baseline_commit"
+      - name: Compile benchmark binaries
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/current-bench.test" ./benchmarks
+          (
+            cd "$RUNNER_TEMP/golyglot-baseline"
+            CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/baseline-bench.test" ./benchmarks
+          )
+      - name: Run alternating samples
+        run: |
+          set -euo pipefail
+          baseline_output="$RUNNER_TEMP/baseline-bench.txt"
+          current_output="$RUNNER_TEMP/current-bench.txt"
+          : > "$baseline_output"
+          : > "$current_output"
+          benchmark='^(BenchmarkParse|BenchmarkTranspile|BenchmarkFormat)$'
+          run_one() {
+            local binary=$1
+            local output=$2
+            GOMAXPROCS=1 taskset -c 0 "$binary" \
+              -test.run '^$' -test.bench "$benchmark" -test.benchmem \
+              -test.count=1 -test.benchtime=1s -test.cpu=1 >> "$output"
+          }
+          for sample in 1 2 3 4 5; do
+            if (( sample % 2 )); then
+              run_one "$RUNNER_TEMP/baseline-bench.test" "$baseline_output"
+              run_one "$RUNNER_TEMP/current-bench.test" "$current_output"
+            else
+              run_one "$RUNNER_TEMP/current-bench.test" "$current_output"
+              run_one "$RUNNER_TEMP/baseline-bench.test" "$baseline_output"
+            fi
+          done
+      - name: Compare medians
+        env:
+          FAIL_REGRESSION_PERCENT: ${{ inputs.fail_regression_percent }}
+        run: |
+          set -euo pipefail
+          python3 tools/compare_benchmarks.py \
+            "$RUNNER_TEMP/baseline-bench.txt" \
+            "$RUNNER_TEMP/current-bench.txt" \
+            --output "$RUNNER_TEMP/benchmark-comparison.md" \
+            --fail-regression-percent "$FAIL_REGRESSION_PERCENT"
+          cat "$RUNNER_TEMP/benchmark-comparison.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Run deterministic corpus sample
+        run: |
+          set -euo pipefail
+          GOMAXPROCS=1 taskset -c 0 "$RUNNER_TEMP/current-bench.test" \
+            -test.run '^$' -test.bench '^BenchmarkCorpusTranspile$' \
+            -test.benchmem -test.count=3 -test.benchtime=250ms -test.cpu=1 \
+            > "$RUNNER_TEMP/corpus-bench.txt"
+      - name: Upload Go benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-benchmark-comparison
+          path: |
+            ${{ runner.temp }}/baseline-bench.txt
+            ${{ runner.temp }}/current-bench.txt
+            ${{ runner.temp }}/benchmark-comparison.md
+            ${{ runner.temp }}/corpus-bench.txt
+          retention-days: 14
+
+  polyglot-core:
+    name: Polyglot core Criterion suites
+    if: ${{ inputs.run_polyglot_core }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      POLYGLOT_REF: d5aa0d493c281398c9fdbc6febd3577f10ceac2f
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check runner resources
+        run: |
+          free -h
+          df -h
+          rustc --version
+          cargo --version
+      - name: Check out pinned Polyglot
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/tobilg/polyglot.git .cache/polyglot
+          git -C .cache/polyglot fetch --depth=1 origin "$POLYGLOT_REF"
+          git -C .cache/polyglot checkout --detach FETCH_HEAD
+          test "$(git -C .cache/polyglot rev-parse HEAD)" = "$POLYGLOT_REF"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cache/polyglot/target
+          key: polyglot-core-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cache/polyglot/Cargo.lock') }}
+      - name: Run parser core benchmark
+        run: |
+          set -o pipefail
+          /usr/bin/time -v -o "$RUNNER_TEMP/polyglot-parser-resources.txt" \
+            env CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16 \
+            make bench-polyglot POLYGLOT_BENCH_PROFILE=bench \
+            |& tee "$RUNNER_TEMP/polyglot-parser.txt"
+      - name: Run transpiler core benchmark
+        run: |
+          set -o pipefail
+          /usr/bin/time -v -o "$RUNNER_TEMP/polyglot-transpile-resources.txt" \
+            env CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16 \
+            make bench-polyglot-transpile \
+            |& tee "$RUNNER_TEMP/polyglot-transpile.txt"
+      - name: Upload Polyglot Criterion results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: polyglot-core-benchmarks
+          path: |
+            ${{ runner.temp }}/polyglot-parser.txt
+            ${{ runner.temp }}/polyglot-parser-resources.txt
+            ${{ runner.temp }}/polyglot-transpile.txt
+            ${{ runner.temp }}/polyglot-transpile-resources.txt
+            .cache/polyglot/target/criterion
+          if-no-files-found: warn
+          retention-days: 14
