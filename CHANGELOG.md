@@ -5,7 +5,8 @@
 - Complete compatibility coverage for the 14,091-case checked-in corpus.
 - Versioned Polyglot FFI validation and matched benchmark suites.
 - Deterministic corpus and private-workload benchmark manifests.
-- A manually dispatched workflow for memory-heavy benchmark builds.
+- A same-runner, fully optimized Polyglot core comparison with binary-size
+  evidence and guarded Golyglot revision benchmarks.
 
 ## 0.1.0-alpha.1 - 2026-08-15
 

@@ -167,14 +167,30 @@ make bench-polyglot-transpile
 It enables Polyglot's full benchmark profile and may need more memory than the
 parser-only target.
 
-The manually dispatched `.github/workflows/benchmarks.yml` workflow moves this
-memory-heavy work to GitHub Actions. It alternates five Go samples against a
-chosen baseline ref, uploads the raw results and comparison table, and can run
-both pinned Polyglot Criterion suites with two Cargo build jobs. The runner
-input defaults to `ubuntu-latest`; repositories with a configured larger
-runner can supply its label when dispatching the workflow. Criterion output,
-resource-usage logs, and generated reports are retained as workflow artifacts.
-The regression threshold defaults to zero, meaning report without failing.
+The manually dispatched `.github/workflows/benchmarks.yml` workflow moves the
+memory-heavy comparison to GitHub Actions. Its optimized core job builds the
+pinned Polyglot commit with the unmodified Cargo `bench` profile: optimization
+level 3, full LTO, and one codegen unit. It uses one Cargo build job and adds
+swap headroom on smaller hosted runners instead of weakening those settings.
+
+Golyglot and Polyglot then run as stripped standalone executables in the same
+job, on the same pinned CPU, reading the same SQL files from `core_cases/`.
+Every transpilation result must match exactly before timing. Ten one-second
+samples per parse/transpile case are paired and their execution order is
+alternated; the report includes a paired-bootstrap interval, raw samples,
+pinned Go/Rust toolchains, CPU details, input and binary hashes, and peak build
+memory.
+
+The report also compares the stripped executables' on-disk and ELF section
+sizes. This is a linked runner-footprint comparison, not a claim that a Go
+package and a Rust crate have directly comparable standalone library files.
+
+An optional `baseline_ref` enables the separate Golyglot revision comparison.
+It is blank by default, and the workflow rejects a baseline that resolves to
+the current commit so identical binaries cannot be mislabeled as a regression.
+The runner input defaults to the explicit `ubuntu-24.04` image; a configured
+larger-runner label can be supplied when dispatching the workflow. Raw evidence
+is retained as a workflow artifact for 14 days.
 
 Polyglot's lineage suite is not wired into the default comparison: the Go
 public lineage API intentionally reparses SQL, so it should be reported

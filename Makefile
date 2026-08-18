@@ -35,7 +35,7 @@ test:
 
 test-tools:
 	python3 -m unittest discover -s tools -p 'test_*.py'
-	python3 -m py_compile tools/polyglot_ffi_oracle.py tools/polyglot_ffi_fixture_bench.py tools/select_polyglot_benchmark_cases.py tools/compare_benchmarks.py
+	python3 -m py_compile tools/polyglot_ffi_oracle.py tools/polyglot_ffi_fixture_bench.py tools/select_polyglot_benchmark_cases.py tools/compare_benchmarks.py tools/compare_core_benchmarks.py tools/verify_polyglot_bench_profile.py
 
 fmt-check:
 	test -z "$$(gofmt -l .)"

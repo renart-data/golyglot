@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       baseline_ref:
-        description: Git ref to compare against
-        required: true
-        default: main
+        description: Optional Golyglot ref; blank skips revision comparison
+        required: false
+        default: ""
         type: string
       runner:
         description: GitHub-hosted or larger-runner label
         required: true
-        default: ubuntu-latest
+        default: ubuntu-24.04
         type: string
       fail_regression_percent:
         description: Optional median regression threshold; zero only reports
@@ -19,10 +19,20 @@ on:
         default: "0"
         type: string
       run_polyglot_core:
-        description: Compile and run the memory-heavy Polyglot Criterion suites
+        description: Build and compare the fully optimized Polyglot core
         required: true
         default: true
         type: boolean
+      core_samples:
+        description: Paired samples per optimized core benchmark
+        required: true
+        default: 10
+        type: number
+      core_duration_ms:
+        description: Timed duration of each core sample in milliseconds
+        required: true
+        default: 1000
+        type: number
 
 permissions:
   contents: read
@@ -33,18 +43,19 @@ concurrency:
 
 jobs:
   go-benchmarks:
-    name: Go benchmark comparison
+    name: Go revision comparison
+    if: ${{ inputs.baseline_ref != '' }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go.mod
+          go-version: 1.25.12
           cache: true
-      - name: Resolve baseline
+      - name: Resolve distinct baseline
         env:
           BASELINE_REF: ${{ inputs.baseline_ref }}
         run: |
@@ -55,15 +66,19 @@ jobs:
             git fetch --no-tags origin "$BASELINE_REF"
             baseline_commit=$(git rev-parse FETCH_HEAD)
           fi
+          if [[ "$baseline_commit" == "$GITHUB_SHA" ]]; then
+            echo "::error::baseline_ref and current ref both resolve to $GITHUB_SHA"
+            exit 1
+          fi
           echo "BASELINE_COMMIT=$baseline_commit" >> "$GITHUB_ENV"
           git worktree add --detach "$RUNNER_TEMP/golyglot-baseline" "$baseline_commit"
       - name: Compile benchmark binaries
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/current-bench.test" ./benchmarks
+          CGO_ENABLED=0 go test -c -trimpath -o "$RUNNER_TEMP/current-bench.test" ./benchmarks
           (
             cd "$RUNNER_TEMP/golyglot-baseline"
-            CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/baseline-bench.test" ./benchmarks
+            CGO_ENABLED=0 go test -c -trimpath -o "$RUNNER_TEMP/baseline-bench.test" ./benchmarks
           )
       - name: Run alternating samples
         run: |
@@ -107,11 +122,11 @@ jobs:
             -test.run '^$' -test.bench '^BenchmarkCorpusTranspile$' \
             -test.benchmem -test.count=3 -test.benchtime=250ms -test.cpu=1 \
             > "$RUNNER_TEMP/corpus-bench.txt"
-      - name: Upload Go benchmark results
+      - name: Upload Go revision results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: go-benchmark-comparison
+          name: go-revision-comparison
           path: |
             ${{ runner.temp }}/baseline-bench.txt
             ${{ runner.temp }}/current-bench.txt
@@ -120,22 +135,43 @@ jobs:
           retention-days: 14
 
   polyglot-core:
-    name: Polyglot core Criterion suites
+    name: Fully optimized core comparison
     if: ${{ inputs.run_polyglot_core }}
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 180
     env:
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "1"
       CARGO_INCREMENTAL: "0"
+      GO_VERSION: 1.25.12
       POLYGLOT_REF: d5aa0d493c281398c9fdbc6febd3577f10ceac2f
+      RUST_TOOLCHAIN: 1.97.1
     steps:
-      - uses: actions/checkout@v4
-      - name: Check runner resources
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Select pinned Rust toolchain
         run: |
-          free -h
-          df -h
-          rustc --version
-          cargo --version
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Record runner and toolchain
+        env:
+          RUNNER_LABEL: ${{ inputs.runner }}
+        run: |
+          set -euo pipefail
+          {
+            echo "golyglot_commit=$GITHUB_SHA"
+            echo "runner=$RUNNER_LABEL"
+            uname -a
+            lscpu
+            free -h
+            df -h
+            go version
+            rustc --version --verbose
+            cargo --version --verbose
+          } | tee "$RUNNER_TEMP/environment.txt"
       - name: Check out pinned Polyglot
         run: |
           set -euo pipefail
@@ -143,37 +179,194 @@ jobs:
           git -C .cache/polyglot fetch --depth=1 origin "$POLYGLOT_REF"
           git -C .cache/polyglot checkout --detach FETCH_HEAD
           test "$(git -C .cache/polyglot rev-parse HEAD)" = "$POLYGLOT_REF"
-      - uses: actions/cache@v4
+      - name: Cache Cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            .cache/polyglot/target
-          key: polyglot-core-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cache/polyglot/Cargo.lock') }}
-      - name: Run parser core benchmark
+          key: polyglot-core-registry-${{ env.RUST_TOOLCHAIN }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cache/polyglot/Cargo.lock') }}
+      - name: Verify optimized profile and install comparison runner
         run: |
-          set -o pipefail
-          /usr/bin/time -v -o "$RUNNER_TEMP/polyglot-parser-resources.txt" \
-            env CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16 \
-            make bench-polyglot POLYGLOT_BENCH_PROFILE=bench \
-            |& tee "$RUNNER_TEMP/polyglot-parser.txt"
-      - name: Run transpiler core benchmark
+          set -euo pipefail
+          if env | grep -q '^CARGO_PROFILE_'; then
+            echo "::error::CARGO_PROFILE overrides would invalidate the optimized comparison"
+            env | grep '^CARGO_PROFILE_'
+            exit 1
+          fi
+          python3 tools/verify_polyglot_bench_profile.py .cache/polyglot/Cargo.toml \
+            | tee "$RUNNER_TEMP/polyglot-profile.json"
+          install -D -m 0644 tools/polyglot_core_bench.rs \
+            .cache/polyglot/crates/polyglot-sql/src/bin/golyglot_core_bench.rs
+          git -C .cache/polyglot diff --exit-code
+          test "$(git -C .cache/polyglot status --porcelain --untracked-files=all)" = \
+            "?? crates/polyglot-sql/src/bin/golyglot_core_bench.rs"
+          sha256sum tools/polyglot_core_bench.rs \
+            .cache/polyglot/crates/polyglot-sql/src/bin/golyglot_core_bench.rs \
+            | tee "$RUNNER_TEMP/runner-source-sha256.txt"
+      - name: Fetch locked Rust dependencies
         run: |
+          set -euo pipefail
+          cargo fetch --manifest-path .cache/polyglot/Cargo.toml --locked
+      - name: Add memory headroom for full LTO
+        run: |
+          set -euo pipefail
+          memory_kib=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+          if (( memory_kib < 25165824 )); then
+            swap_path="$RUNNER_TEMP/polyglot-build.swap"
+            available_kib=$(df --output=avail -k "$RUNNER_TEMP" | tail -n 1)
+            if (( available_kib < 52428800 )); then
+              echo "::error::need at least 50 GiB free for full-LTO build and swap headroom"
+              exit 1
+            fi
+            sudo fallocate -l 24G "$swap_path"
+            sudo chmod 600 "$swap_path"
+            sudo mkswap "$swap_path"
+            sudo swapon "$swap_path"
+            echo "BUILD_SWAP_PATH=$swap_path" >> "$GITHUB_ENV"
+          fi
+          free -h
+          swapon --show
+      - name: Build equivalent optimized runners
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go build -trimpath -ldflags='-s -w -buildid=' \
+            -o "$RUNNER_TEMP/golyglot-core-bench" ./cmd/golyglot-core-bench
           set -o pipefail
-          /usr/bin/time -v -o "$RUNNER_TEMP/polyglot-transpile-resources.txt" \
-            env CARGO_PROFILE_BENCH_LTO=false CARGO_PROFILE_BENCH_CODEGEN_UNITS=16 \
-            make bench-polyglot-transpile \
-            |& tee "$RUNNER_TEMP/polyglot-transpile.txt"
-      - name: Upload Polyglot Criterion results
+          /usr/bin/time -v -o "$RUNNER_TEMP/polyglot-build-resources.txt" \
+            cargo build --manifest-path .cache/polyglot/Cargo.toml \
+              --profile bench --frozen -p polyglot-sql \
+              --bin golyglot_core_bench \
+            |& tee "$RUNNER_TEMP/polyglot-build.log"
+          install -m 0755 \
+            .cache/polyglot/target/release/golyglot_core_bench \
+            "$RUNNER_TEMP/polyglot-core-bench"
+          strip --strip-all "$RUNNER_TEMP/golyglot-core-bench"
+          strip --strip-all "$RUNNER_TEMP/polyglot-core-bench"
+          free -h
+          swapon --show
+      - name: Validate matched results
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/core-correctness"
+          mkdir -p "$output_dir"
+          while IFS=$'\t' read -r operation case_name sql_name; do
+            sql_path="benchmarks/core_cases/$sql_name"
+            golyglot_output="$output_dir/$operation-$case_name.golyglot.txt"
+            polyglot_output="$output_dir/$operation-$case_name.polyglot.txt"
+            GOMAXPROCS=1 "$RUNNER_TEMP/golyglot-core-bench" \
+              --mode result --operation "$operation" --case "$case_name" \
+              --sql-file "$sql_path" > "$golyglot_output"
+            "$RUNNER_TEMP/polyglot-core-bench" \
+              --mode result --operation "$operation" --case "$case_name" \
+              --sql-file "$sql_path" > "$polyglot_output"
+            diff -u "$golyglot_output" "$polyglot_output"
+          done < benchmarks/core_cases/cases.tsv
+          sha256sum benchmarks/core_cases/*.sql | tee "$RUNNER_TEMP/core-input-sha256.txt"
+      - name: Record stripped binary footprint
+        run: |
+          set -euo pipefail
+          {
+            stat --printf='%n\t%s bytes\n' \
+              "$RUNNER_TEMP/golyglot-core-bench" \
+              "$RUNNER_TEMP/polyglot-core-bench"
+            sha256sum \
+              "$RUNNER_TEMP/golyglot-core-bench" \
+              "$RUNNER_TEMP/polyglot-core-bench"
+            file \
+              "$RUNNER_TEMP/golyglot-core-bench" \
+              "$RUNNER_TEMP/polyglot-core-bench"
+            size \
+              "$RUNNER_TEMP/golyglot-core-bench" \
+              "$RUNNER_TEMP/polyglot-core-bench"
+            ldd "$RUNNER_TEMP/golyglot-core-bench" || true
+            ldd "$RUNNER_TEMP/polyglot-core-bench" || true
+          } | tee "$RUNNER_TEMP/binary-footprint.txt"
+      - name: Run balanced paired samples
+        env:
+          CORE_DURATION_MS: ${{ inputs.core_duration_ms }}
+          CORE_SAMPLES: ${{ inputs.core_samples }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$CORE_SAMPLES" =~ ^[0-9]+$ ]] || (( CORE_SAMPLES < 5 || CORE_SAMPLES > 30 )); then
+            echo "::error::core_samples must be an integer from 5 through 30"
+            exit 1
+          fi
+          if ! [[ "$CORE_DURATION_MS" =~ ^[0-9]+$ ]] || (( CORE_DURATION_MS < 100 || CORE_DURATION_MS > 5000 )); then
+            echo "::error::core_duration_ms must be an integer from 100 through 5000"
+            exit 1
+          fi
+          golyglot_output="$RUNNER_TEMP/golyglot-core.tsv"
+          polyglot_output="$RUNNER_TEMP/polyglot-core.tsv"
+          : > "$golyglot_output"
+          : > "$polyglot_output"
+          run_golyglot() {
+            local sample=$1 operation=$2 case_name=$3 sql_path=$4
+            taskset -c 0 env GOMAXPROCS=1 "$RUNNER_TEMP/golyglot-core-bench" \
+              --sample "$sample" --operation "$operation" --case "$case_name" \
+              --sql-file "$sql_path" --warmup 250ms \
+              --duration "${CORE_DURATION_MS}ms" >> "$golyglot_output"
+          }
+          run_polyglot() {
+            local sample=$1 operation=$2 case_name=$3 sql_path=$4
+            taskset -c 0 "$RUNNER_TEMP/polyglot-core-bench" \
+              --sample "$sample" --operation "$operation" --case "$case_name" \
+              --sql-file "$sql_path" --warmup-ms 250 \
+              --duration-ms "$CORE_DURATION_MS" >> "$polyglot_output"
+          }
+          for (( sample = 1; sample <= CORE_SAMPLES; sample++ )); do
+            case_index=0
+            while IFS=$'\t' read -r operation case_name sql_name; do
+              sql_path="benchmarks/core_cases/$sql_name"
+              echo "sample $sample/$CORE_SAMPLES: $operation/$case_name"
+              if (( (sample + case_index) % 2 )); then
+                run_golyglot "$sample" "$operation" "$case_name" "$sql_path"
+                run_polyglot "$sample" "$operation" "$case_name" "$sql_path"
+              else
+                run_polyglot "$sample" "$operation" "$case_name" "$sql_path"
+                run_golyglot "$sample" "$operation" "$case_name" "$sql_path"
+              fi
+              case_index=$((case_index + 1))
+            done < benchmarks/core_cases/cases.tsv
+          done
+      - name: Compare optimized cores
+        env:
+          CORE_SAMPLES: ${{ inputs.core_samples }}
+        run: |
+          set -euo pipefail
+          python3 tools/compare_core_benchmarks.py \
+            "$RUNNER_TEMP/golyglot-core.tsv" \
+            "$RUNNER_TEMP/polyglot-core.tsv" \
+            --golyglot-binary "$RUNNER_TEMP/golyglot-core-bench" \
+            --polyglot-binary "$RUNNER_TEMP/polyglot-core-bench" \
+            --minimum-samples "$CORE_SAMPLES" \
+            --output "$RUNNER_TEMP/core-comparison.md"
+          {
+            echo "# Fully optimized Golyglot / Polyglot comparison"
+            echo
+            echo "- Golyglot: \`$GITHUB_SHA\`"
+            echo "- Polyglot: \`$POLYGLOT_REF\`"
+            echo "- Polyglot profile: \`bench\`, opt-level 3, LTO enabled, one codegen unit"
+            echo "- Same runner and CPU; paired order alternates for every case and sample"
+            echo
+            cat "$RUNNER_TEMP/core-comparison.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload optimized comparison evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: polyglot-core-benchmarks
+          name: optimized-core-comparison
           path: |
-            ${{ runner.temp }}/polyglot-parser.txt
-            ${{ runner.temp }}/polyglot-parser-resources.txt
-            ${{ runner.temp }}/polyglot-transpile.txt
-            ${{ runner.temp }}/polyglot-transpile-resources.txt
-            .cache/polyglot/target/criterion
+            ${{ runner.temp }}/environment.txt
+            ${{ runner.temp }}/polyglot-profile.json
+            ${{ runner.temp }}/runner-source-sha256.txt
+            ${{ runner.temp }}/polyglot-build.log
+            ${{ runner.temp }}/polyglot-build-resources.txt
+            ${{ runner.temp }}/core-correctness
+            ${{ runner.temp }}/core-input-sha256.txt
+            ${{ runner.temp }}/binary-footprint.txt
+            ${{ runner.temp }}/golyglot-core.tsv
+            ${{ runner.temp }}/polyglot-core.tsv
+            ${{ runner.temp }}/core-comparison.md
           if-no-files-found: warn
           retention-days: 14

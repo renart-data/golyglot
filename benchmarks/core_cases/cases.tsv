@@ -1,0 +1,6 @@
+parse	simple	simple.sql
+parse	medium	medium.sql
+parse	complex	parse-complex.sql
+transpile	simple	simple.sql
+transpile	medium	medium.sql
+transpile	complex	transpile-complex.sql
