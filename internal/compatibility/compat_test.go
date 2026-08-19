@@ -1,4 +1,4 @@
-package golyglot
+package compatibility
 
 import (
 	"encoding/json"
@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/renart-data/golyglot"
 )
 
 type parserFixture struct {
@@ -29,22 +31,33 @@ type identityFixture struct {
 
 func sqlglotFixturePath(name string) string {
 	if root := os.Getenv("GOLYGLOT_SQLGLOT_FIXTURES"); root != "" {
+		if !filepath.IsAbs(root) {
+			root = repositoryPath(root)
+		}
 		return filepath.Join(root, name)
 	}
-	return filepath.Join("testdata", "polyglot", "sqlglot_fixtures", name)
+	return polyglotTestdataPath("sqlglot_fixtures", name)
+}
+
+func polyglotTestdataPath(elements ...string) string {
+	return repositoryPath(append([]string{"testdata", "polyglot"}, elements...)...)
+}
+
+func repositoryPath(elements ...string) string {
+	return filepath.Join(append([]string{"..", ".."}, elements...)...)
 }
 
 // TestPolyglotParserFixtureShape consumes the same parser.json shape emitted
 // by Polyglot's SQLGlot extraction tool. Generated full fixtures can be placed
 // in testdata/polyglot without changing this test.
 func TestPolyglotParserFixtureShape(t *testing.T) {
-	runParserFixture(t, filepath.Join("testdata", "polyglot", "parser.json"))
+	runParserFixture(t, polyglotTestdataPath("parser.json"))
 }
 
 func TestPolyglotFullParserFixtureIfPresent(t *testing.T) {
 	path := sqlglotFixturePath("parser.json")
 	if _, err := os.Stat(path); err != nil {
-		legacyPath := filepath.Join("testdata", "polyglot", "parser.full.json")
+		legacyPath := polyglotTestdataPath("parser.full.json")
 		if _, legacyErr := os.Stat(legacyPath); legacyErr != nil {
 			t.Skip("upstream fixture not present; run make fixtures")
 		}
@@ -76,14 +89,14 @@ func runParserFixture(t *testing.T, path string) {
 			if test.Read != "" || test.Write != "" {
 				t.Skip("dialect-specific fixture awaits dialect generator support")
 			}
-			result, err := ParseStrict(test.SQL, DialectGeneric)
+			result, err := golyglot.ParseStrict(test.SQL, golyglot.DialectGeneric)
 			if err != nil {
 				t.Fatalf("parse %q: %v\n%#v", test.SQL, err, result.Diagnostics)
 			}
 			if len(result.Statements) != 1 {
 				t.Fatalf("got %d statements", len(result.Statements))
 			}
-			generated, err := GenerateWithOptions(result.Statements[0].Node, GenerateOptions{Pretty: strings.Contains(test.Expected, "\n")})
+			generated, err := golyglot.GenerateWithOptions(result.Statements[0].Node, golyglot.GenerateOptions{Pretty: strings.Contains(test.Expected, "\n")})
 			if err != nil {
 				t.Fatalf("generate %q: %v", test.SQL, err)
 			}
@@ -94,7 +107,7 @@ func runParserFixture(t *testing.T, path string) {
 	}
 	for i, test := range fixture.Errors {
 		t.Run("error/"+itoa(i), func(t *testing.T) {
-			_, err := ParseStrict(test.SQL, DialectGeneric)
+			_, err := golyglot.ParseStrict(test.SQL, golyglot.DialectGeneric)
 			if err == nil {
 				t.Fatalf("ParseStrict(%q) succeeded, want syntax error", test.SQL)
 			}
@@ -105,7 +118,7 @@ func runParserFixture(t *testing.T, path string) {
 func TestPolyglotFullIdentityFixtureIfPresent(t *testing.T) {
 	path := sqlglotFixturePath("identity.json")
 	if _, err := os.Stat(path); err != nil {
-		legacyPath := filepath.Join("testdata", "polyglot", "identity.full.json")
+		legacyPath := polyglotTestdataPath("identity.full.json")
 		if _, legacyErr := os.Stat(legacyPath); legacyErr != nil {
 			t.Skip("upstream fixture not present; run make fixtures")
 		}
@@ -134,10 +147,10 @@ func runIdentityFixture(t *testing.T, path string) {
 	}
 	failures := make([]string, 0, 20)
 	for i, test := range fixture.Tests {
-		result, parseErr := ParseStrict(test.SQL, DialectGeneric)
+		result, parseErr := golyglot.ParseStrict(test.SQL, golyglot.DialectGeneric)
 		if parseErr != nil || len(result.Statements) != 1 {
 			failures = append(failures, "parse "+itoa(i)+": "+test.SQL)
-		} else if generated, generateErr := Generate(result.Statements[0].Node); generateErr != nil || generated != test.SQL {
+		} else if generated, generateErr := golyglot.Generate(result.Statements[0].Node); generateErr != nil || generated != test.SQL {
 			failures = append(failures, "generate "+itoa(i)+": got "+generated+" want "+test.SQL)
 		}
 		if len(failures) == cap(failures) {

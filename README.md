@@ -6,6 +6,10 @@ cgo, WASM, FFI, or production dependencies.
 Inspired by and rewritten from the original [Polyglot](https://github.com/tobilg/polyglot)
 SQL library, with credit to its authors and contributors.
 
+```sh
+go get github.com/renart-data/golyglot
+```
+
 ```go
 result := golyglot.ParseTolerant("SELECT * FROM users WHERE", golyglot.DialectPostgreSQL)
 for _, diagnostic := range result.Diagnostics {

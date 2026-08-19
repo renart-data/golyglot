@@ -1,13 +1,14 @@
 {
   "name": "golyglot-docs",
   "private": true,
+  "packageManager": "pnpm@10.33.0",
   "type": "module",
   "scripts": {
     "dev": "astro dev",
-    "predev": "pnpm build:wasm",
+    "predev": "node scripts/build-wasm.mjs",
     "build:wasm": "node scripts/build-wasm.mjs",
     "build": "astro build",
-    "prebuild": "pnpm build:wasm",
+    "prebuild": "node scripts/build-wasm.mjs",
     "preview": "astro preview",
     "astro": "astro"
   },

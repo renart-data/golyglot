@@ -1,4 +1,4 @@
-package golyglot
+package compatibility
 
 import (
 	"encoding/json"
@@ -138,7 +138,7 @@ func TestSQLGlotFixtureSourceIsPresent(t *testing.T) {
 }
 
 func TestPolyglotCustomFixtureCorpusShape(t *testing.T) {
-	root := filepath.Join("testdata", "polyglot", "custom_fixtures", "datafusion")
+	root := polyglotTestdataPath("custom_fixtures", "datafusion")
 	expectedIdentity := map[string]int{
 		"ddl.json":           22,
 		"dml.json":           10,

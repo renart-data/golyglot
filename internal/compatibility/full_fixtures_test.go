@@ -1,4 +1,4 @@
-package golyglot
+package compatibility
 
 import (
 	"encoding/json"
@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/renart-data/golyglot"
 )
 
 // The full compatibility corpus is opt-in because it is intentionally much
@@ -159,7 +161,7 @@ func TestSQLGlotFullFixtures(t *testing.T) {
 		total.merge(stats)
 	}
 
-	customRoot := filepath.Join("testdata", "polyglot", "custom_fixtures")
+	customRoot := polyglotTestdataPath("custom_fixtures")
 	customEntries, err := os.ReadDir(customRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -216,13 +218,13 @@ func runFullParserFixtures(t *testing.T, path string) fullFixtureStats {
 			to := fullDialectOrGeneric(test.Write)
 			got, err = fullTranspile(test.SQL, from, to, test.Expected)
 		} else {
-			got, err = fullTranspile(test.SQL, DialectGeneric, DialectGeneric, test.Expected)
+			got, err = fullTranspile(test.SQL, golyglot.DialectGeneric, golyglot.DialectGeneric, test.Expected)
 		}
 		stats.record(id, test.SQL, test.Expected, got, err)
 	}
 	for index, test := range fixture.Errors {
 		dialect := fullDialectOrGeneric(test.Read)
-		_, err := ParseStrict(test.SQL, dialect)
+		_, err := golyglot.ParseStrict(test.SQL, dialect)
 		if err == nil {
 			stats.record(fmt.Sprintf("parser error:%d", index), test.SQL, "parse error", "parsed successfully", fmt.Errorf("expected parse error"))
 		} else {
@@ -236,16 +238,16 @@ func runFullTranspileFixtures(t *testing.T, path string) fullFixtureStats {
 	fixture := readFullJSON[fullTranspileFixture](t, path)
 	var stats fullFixtureStats
 	for index, test := range fixture.Normalization {
-		got, err := fullTranspile(test.SQL, DialectGeneric, DialectGeneric, test.Expected)
+		got, err := fullTranspile(test.SQL, golyglot.DialectGeneric, golyglot.DialectGeneric, test.Expected)
 		stats.record(fmt.Sprintf("normalization:%d", index), test.SQL, test.Expected, got, err)
 	}
 	for index, test := range fixture.Transpilation {
-		var from, to Dialect
+		var from, to golyglot.Dialect
 		switch {
 		case test.Write != nil:
-			from, to = DialectGeneric, fullDialectOrGeneric(test.Write)
+			from, to = golyglot.DialectGeneric, fullDialectOrGeneric(test.Write)
 		case test.Read != nil:
-			from, to = fullDialectOrGeneric(test.Read), DialectGeneric
+			from, to = fullDialectOrGeneric(test.Read), golyglot.DialectGeneric
 		default:
 			continue
 		}
@@ -265,7 +267,7 @@ func runFullPrettyFixtures(t *testing.T, path string) fullFixtureStats {
 	fixture := readFullJSON[prettyFixture](t, path)
 	var stats fullFixtureStats
 	for index, test := range fixture.Tests {
-		got, err := FormatOne(test.Input, DialectGeneric)
+		got, err := golyglot.FormatOne(test.Input, golyglot.DialectGeneric)
 		stats.record(fmt.Sprintf("pretty:%d", index), test.Input, strings.TrimSpace(test.Expected), strings.TrimSpace(got), err)
 	}
 	return stats
@@ -352,7 +354,7 @@ func runFullCustomFixture(t *testing.T, path, dialectName, category string) full
 			stats.record(fmt.Sprintf("custom %s/%s write %s:%d", dialectName, category, targetName, index), test.SQL, want, got, err)
 		}
 		for sourceName, sourceSQL := range test.Read {
-			source, err := ParseDialect(sourceName)
+			source, err := golyglot.ParseDialect(sourceName)
 			if err != nil {
 				stats.record(fmt.Sprintf("custom %s/%s read %s:%d", dialectName, category, sourceName, index), sourceSQL, test.SQL, "", err)
 				continue
@@ -364,18 +366,18 @@ func runFullCustomFixture(t *testing.T, path, dialectName, category string) full
 	return stats
 }
 
-func fullDialectOrGeneric(name *string) Dialect {
+func fullDialectOrGeneric(name *string) golyglot.Dialect {
 	if name == nil {
-		return DialectGeneric
+		return golyglot.DialectGeneric
 	}
-	dialect, err := ParseDialect(*name)
+	dialect, err := golyglot.ParseDialect(*name)
 	if err != nil {
-		return Dialect(*name)
+		return golyglot.Dialect(*name)
 	}
 	return dialect
 }
 
-func fullParseDialect(name string) (Dialect, string, error) {
+func fullParseDialect(name string) (golyglot.Dialect, string, error) {
 	version := ""
 	normalized := strings.ToLower(strings.TrimSpace(name))
 	if normalized == "spark2" {
@@ -386,34 +388,34 @@ func fullParseDialect(name string) (Dialect, string, error) {
 			version = strings.TrimSpace(strings.TrimPrefix(suffix, "version="))
 		}
 	}
-	dialect, err := ParseDialect(name)
+	dialect, err := golyglot.ParseDialect(name)
 	return dialect, version, err
 }
 
 func generateFullGeneric(sql string, pretty bool) (string, error) {
-	result, err := ParseStrict(sql, DialectGeneric)
+	result, err := golyglot.ParseStrict(sql, golyglot.DialectGeneric)
 	if err != nil {
 		return "", err
 	}
 	if len(result.Statements) != 1 {
 		return "", fmt.Errorf("expected one statement, got %d", len(result.Statements))
 	}
-	return GenerateWithOptions(result.Statements[0].Node, GenerateOptions{Pretty: pretty})
+	return golyglot.GenerateWithOptions(result.Statements[0].Node, golyglot.GenerateOptions{Pretty: pretty})
 }
 
-func fullTranspile(sql string, from, to Dialect, expected string, targetVersion ...string) (string, error) {
-	return fullTranspileWithOptions(sql, from, to, expected, TranspileOptions{Pretty: hasFormattingNewline(expected)}, targetVersion...)
+func fullTranspile(sql string, from, to golyglot.Dialect, expected string, targetVersion ...string) (string, error) {
+	return fullTranspileWithOptions(sql, from, to, expected, golyglot.TranspileOptions{Pretty: hasFormattingNewline(expected)}, targetVersion...)
 }
 
-func fullIdentityTranspile(sql string, from, to Dialect, expected string, identify bool, targetVersion ...string) (string, error) {
-	return fullTranspileWithOptions(sql, from, to, expected, TranspileOptions{Pretty: hasFormattingNewline(expected), Identify: identify}, targetVersion...)
+func fullIdentityTranspile(sql string, from, to golyglot.Dialect, expected string, identify bool, targetVersion ...string) (string, error) {
+	return fullTranspileWithOptions(sql, from, to, expected, golyglot.TranspileOptions{Pretty: hasFormattingNewline(expected), Identify: identify}, targetVersion...)
 }
 
-func fullTranspileWithOptions(sql string, from, to Dialect, expected string, options TranspileOptions, targetVersion ...string) (string, error) {
+func fullTranspileWithOptions(sql string, from, to golyglot.Dialect, expected string, options golyglot.TranspileOptions, targetVersion ...string) (string, error) {
 	if len(targetVersion) > 0 {
 		options.DialectVersion = targetVersion[0]
 	}
-	outputs, err := TranspileWithOptions(sql, from, to, options)
+	outputs, err := golyglot.TranspileWithOptions(sql, from, to, options)
 	if err != nil {
 		return "", err
 	}

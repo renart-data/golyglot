@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tobilg/golyglot"
+	"github.com/renart-data/golyglot"
 )
 
 const (

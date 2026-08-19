@@ -149,10 +149,10 @@ bench-polyglot-transpile: check-polyglot-source
 	@cd "$(POLYGLOT_CACHE)" && $(POLYGLOT_BENCH_ENV) cargo bench -p polyglot-sql --bench transpile -- --noplot
 
 docs-install:
-	CI=true corepack pnpm --dir docs install --frozen-lockfile
+	cd docs && CI=true corepack pnpm install --frozen-lockfile
 
 docs-dev:
-	corepack pnpm --dir docs dev
+	cd docs && corepack pnpm dev
 
 docs-build:
-	corepack pnpm --dir docs build
+	cd docs && corepack pnpm build

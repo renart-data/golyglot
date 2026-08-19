@@ -7,6 +7,8 @@
 - Deterministic corpus and private-workload benchmark manifests.
 - A same-runner, fully optimized Polyglot core comparison with binary-size
   evidence and guarded Golyglot revision benchmarks.
+- The canonical `github.com/renart-data/golyglot` module path, an isolated
+  compatibility-test package, and fully pinned CI toolchains.
 
 ## 0.1.0-alpha.1 - 2026-08-15
 

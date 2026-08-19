@@ -7,7 +7,7 @@ export default defineConfig({
 		starlight({
 			title: 'golyglot',
 			description: 'Pure-Go SQL parsing and intelligence.',
-			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/tobilg/golyglot' }],
+			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/renart-data/golyglot' }],
 			sidebar: [
 				{
 					label: 'Start here',

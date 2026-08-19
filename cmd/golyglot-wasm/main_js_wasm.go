@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"syscall/js"
 
-	"github.com/tobilg/golyglot"
+	"github.com/renart-data/golyglot"
 )
 
 var callbacks []js.Func

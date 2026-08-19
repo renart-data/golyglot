@@ -3,7 +3,7 @@ package benchmarks_test
 import (
 	"testing"
 
-	"github.com/tobilg/golyglot"
+	"github.com/renart-data/golyglot"
 )
 
 const simpleSelect = "SELECT a, b, c FROM table1"
