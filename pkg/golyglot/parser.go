@@ -10,6 +10,7 @@ const maxDiagnostics = 100
 type parser struct {
 	text        string
 	tokens      []Token
+	tokensOwned bool
 	pos         int
 	lastEnd     int
 	depth       int
@@ -702,6 +703,7 @@ func (p *parser) parseSelect() *SelectStmt {
 		}
 		if p.peek().Kind == TokenEOF || p.peek().Text == ";" || p.peek().Text == ")" {
 			stmt.RawQuery = strings.TrimSpace(p.text[start:p.lastEnd])
+			stmt.nodeBase.span = Span{Start: start, End: p.lastEnd}
 			return stmt
 		}
 	}
@@ -2807,7 +2809,7 @@ func (p *parser) parseExpression(minPrecedence int) Expr {
 				nodeBase: nodeBase{span: Span{Start: left.SourceSpan().Start, End: p.lastEnd}},
 				Value:    left,
 				Operator: map[bool]string{true: "IS NOT", false: "IS"}[not],
-				Right:    &LiteralExpr{nodeBase: nodeBase{span: Span{Start: p.lastEnd, End: p.lastEnd}}, KindValue: LiteralNull, Raw: "NULL"},
+				Right:    &LiteralExpr{nodeBase: nodeBase{span: syntheticSpan()}, KindValue: LiteralNull, Raw: "NULL"},
 			}
 			p.recordNode()
 			continue
@@ -3023,12 +3025,14 @@ func (p *parser) parsePostfix(left Expr) Expr {
 			continue
 		}
 		if (p.options.Dialect == DialectSnowflake || p.options.Dialect == DialectDatabricks) && p.hasSnowflakePathPrefix() {
+			pathStart := p.peek().Span.Start
 			path, ok := p.parseSnowflakePath()
 			if ok {
+				pathSpan := Span{Start: pathStart, End: p.lastEnd}
 				left = &FunctionCallExpr{
 					nodeBase: nodeBase{span: Span{Start: left.SourceSpan().Start, End: p.lastEnd}},
 					Name:     []Identifier{{Text: "GET_PATH"}},
-					Args:     []Expr{left, &LiteralExpr{KindValue: LiteralString, Raw: "'" + strings.ReplaceAll(path, "'", "''") + "'"}},
+					Args:     []Expr{left, &LiteralExpr{nodeBase: nodeBase{span: pathSpan}, KindValue: LiteralString, Raw: "'" + strings.ReplaceAll(path, "'", "''") + "'"}},
 				}
 				p.recordNode()
 				continue
@@ -3124,7 +3128,7 @@ func (p *parser) parsePostfix(left Expr) Expr {
 			// an explicit one. Retaining that normalization in the AST also
 			// lets the generator emit the same canonical form as SQLGlot.
 			if p.options.Dialect == DialectDuckDB && slice && high == nil && step != nil {
-				high = &LiteralExpr{nodeBase: nodeBase{span: Span{Start: start, End: start}}, KindValue: LiteralNumber, Raw: "1"}
+				high = &LiteralExpr{nodeBase: nodeBase{span: syntheticSpan()}, KindValue: LiteralNumber, Raw: "1"}
 			}
 			left = &IndexExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Target: left, Low: low, High: high, Step: step, Slice: slice, Indices: indices}
 			p.recordNode()
@@ -3392,6 +3396,13 @@ func (p *parser) matchGenericClose() bool {
 }
 
 func (p *parser) splitDoubleGreaterToken() {
+	if !p.tokensOwned {
+		// ParseResult exposes the lexer's original token stream. Split the
+		// parser's private view lazily so nested generic closers cannot mutate
+		// or truncate that lossless public stream through the shared slice.
+		p.tokens = append([]Token(nil), p.tokens...)
+		p.tokensOwned = true
+	}
 	tok := p.tokens[p.pos]
 	first := tok
 	first.Text = ">"
@@ -3671,7 +3682,7 @@ func (p *parser) parseIs(left Expr) Expr {
 				}
 			}
 		}
-		return &IsExpr{nodeBase: nodeBase{span: Span{Start: start, End: p.lastEnd}}, Value: left, Operator: operator, Right: &RawExpr{Raw: ""}}
+		return &IsExpr{nodeBase: nodeBase{span: Span{Start: start, End: p.lastEnd}}, Value: left, Operator: operator, Right: &RawExpr{nodeBase: nodeBase{span: syntheticSpan()}, Raw: ""}}
 	}
 	if p.matchWord("DISTINCT") {
 		operator += " DISTINCT"
@@ -3730,7 +3741,7 @@ func (p *parser) parsePrefix() Expr {
 		}
 		var inner Expr
 		if p.peek().Text == ")" {
-			inner = &TupleExpr{nodeBase: nodeBase{span: Span{Start: p.peek().Span.Start, End: p.peek().Span.Start}}}
+			inner = &TupleExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: p.peek().Span.End}}}
 			p.recordNode()
 		} else {
 			inner = p.parseRequiredExpr("inside parentheses")
@@ -4500,14 +4511,25 @@ func (p *parser) parseInterval(start Token, parts []Identifier) Expr {
 		if literal, ok := value.(*LiteralExpr); ok && literal.KindValue == LiteralString {
 			fields := strings.Fields(strings.Trim(literal.Raw, "'"))
 			if len(fields) == 2 {
+				qualifierSpan := syntheticSpan()
+				literalSpan := literal.SourceSpan()
+				if literalSpan.Valid(len(p.text)) {
+					source := p.text[literalSpan.Start:literalSpan.End]
+					if offset := strings.LastIndex(source, fields[1]); offset >= 0 {
+						qualifierSpan = Span{Start: literalSpan.Start + offset, End: literalSpan.Start + offset + len(fields[1])}
+					}
+				}
 				literal.Raw = "'" + fields[0] + "'"
-				qualifiers = append(qualifiers, identifierExpr(strings.ToUpper(fields[1])))
+				qualifiers = append(qualifiers, identifierExprAt(strings.ToUpper(fields[1]), qualifierSpan))
 			}
 		}
 	}
 	end := value.SourceSpan().End
 	if len(qualifiers) > 0 {
-		end = qualifiers[len(qualifiers)-1].SourceSpan().End
+		qualifierSpan := qualifiers[len(qualifiers)-1].SourceSpan()
+		if qualifierSpan.Valid(len(p.text)) && qualifierSpan.End > end {
+			end = qualifierSpan.End
+		}
 	}
 	return &IntervalExpr{nodeBase: nodeBase{span: Span{Start: start.Span.Start, End: end}}, Value: value, Qualifiers: qualifiers}
 }

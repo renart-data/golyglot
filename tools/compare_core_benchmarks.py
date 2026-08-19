@@ -8,6 +8,7 @@ import hashlib
 import math
 import random
 import statistics
+import sys
 from pathlib import Path
 
 
@@ -168,6 +169,33 @@ def comparison_markdown(
     return "\n".join(rows)
 
 
+def slower_benchmarks(
+    golyglot: dict[str, dict[int, float]],
+    polyglot: dict[str, dict[int, float]],
+    prefix: str = "",
+) -> list[tuple[str, float]]:
+    """Return benchmarks whose paired median makes Golyglot slower."""
+    missing = sorted(set(golyglot) ^ set(polyglot))
+    if missing:
+        raise ValueError("benchmark sets differ: " + ", ".join(missing))
+
+    regressions = []
+    for benchmark in sorted(golyglot):
+        if prefix and not benchmark.startswith(prefix):
+            continue
+        golyglot_samples = golyglot[benchmark]
+        polyglot_samples = polyglot[benchmark]
+        if set(golyglot_samples) != set(polyglot_samples):
+            raise ValueError(f"{benchmark} sample numbers differ between implementations")
+        paired_ratio = statistics.median(
+            polyglot_samples[sample] / golyglot_samples[sample]
+            for sample in sorted(golyglot_samples)
+        )
+        if paired_ratio < 1:
+            regressions.append((benchmark, 1 / paired_ratio))
+    return regressions
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("golyglot_samples", type=Path)
@@ -176,24 +204,39 @@ def main() -> int:
     parser.add_argument("--polyglot-binary", type=Path, required=True)
     parser.add_argument("--minimum-samples", type=int, default=5)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--fail-if-golyglot-parse-slower",
+        action="store_true",
+        help="fail when any parse case has a slower paired median than Polyglot",
+    )
     args = parser.parse_args()
     if args.minimum_samples < 1:
         parser.error("--minimum-samples must be positive")
 
     try:
+        golyglot = read_samples(args.golyglot_samples, "golyglot")
+        polyglot = read_samples(args.polyglot_samples, "polyglot")
         markdown = comparison_markdown(
-            read_samples(args.golyglot_samples, "golyglot"),
-            read_samples(args.polyglot_samples, "polyglot"),
+            golyglot,
+            polyglot,
             args.minimum_samples,
             args.golyglot_binary,
             args.polyglot_binary,
         )
+        regressions = slower_benchmarks(golyglot, polyglot, "parse/")
     except (OSError, ValueError) as error:
         parser.error(str(error))
     print(markdown, end="")
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(markdown, encoding="utf-8")
+    if args.fail_if_golyglot_parse_slower and regressions:
+        details = ", ".join(
+            f"{benchmark} ({factor:.2f}x slower)"
+            for benchmark, factor in regressions
+        )
+        print(f"Golyglot parser is slower than Polyglot: {details}", file=sys.stderr)
+        return 1
     return 0
 
 

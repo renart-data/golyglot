@@ -7,7 +7,7 @@ Inspired by and rewritten from the original [Polyglot](https://github.com/tobilg
 SQL library, with credit to its authors and contributors.
 
 ```sh
-go get github.com/renart-data/golyglot
+go get github.com/renart-data/golyglot/pkg/golyglot
 ```
 
 ```go
@@ -21,6 +21,13 @@ Use `Parse`/`ParseStrict` for source-aware ASTs and diagnostics, or
 `Format`/`Transpile` for generated SQL. Tolerant parsing preserves partial
 trees and source spans; unsupported fragments remain lossless raw nodes where
 possible.
+
+`ParseResult.OriginalSQL`, `SourceSlice`, and `SourceGapBefore` expose the
+input byte-for-byte, including whitespace and comments. Use `EditForNode` and
+`ApplyEdits` for lossless source rewrites; AST generation remains the
+canonical-formatting path. Strict syntax errors retain Golyglot's detailed
+diagnostic and also expose the Polyglot-compatible primary diagnostic through
+`SyntaxError.Polyglot`.
 
 Supported features:
 

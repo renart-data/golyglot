@@ -56,10 +56,8 @@ func Parse(sql string, options ParseOptions) (ParseResult, error) {
 	}
 
 	if options.Mode == Strict && hasErrorDiagnostics(result.Diagnostics) {
-		for _, diagnostic := range result.Diagnostics {
-			if diagnostic.Severity == SeverityError {
-				return result, &SyntaxError{Diagnostic: diagnostic}
-			}
+		if diagnostic, ok := polyglotPrimaryDiagnostic(result); ok {
+			return result, newSyntaxError(result, options.Dialect, diagnostic)
 		}
 	}
 	return result, nil

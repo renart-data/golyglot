@@ -130,6 +130,23 @@ func ValidateWithOptions(sql string, options ValidationOptions) ValidationResult
 		result.Valid = false
 		return result
 	}
+	if options.StrictSyntax {
+		if diagnostic, ok := polyglotStrictSyntaxDiagnostic(parsed.Tokens); ok {
+			result.Diagnostics = append(result.Diagnostics, diagnostic)
+			position := parsed.Source.PositionAt(diagnostic.Span.End, PositionUTF32)
+			line, column := position.Line+1, position.Character+1
+			result.Errors = append(result.Errors, ValidationError{
+				Message:  diagnostic.Message,
+				Severity: "error",
+				Code:     diagnostic.Code,
+				Span:     diagnostic.Span,
+				Line:     &line,
+				Column:   &column,
+			})
+			result.Valid = false
+			return result
+		}
+	}
 	if options.Semantic {
 		collector := validationCollector{source: parsed.Source, result: &result, schema: options.Schema}
 		for _, statement := range parsed.Statements {
@@ -143,6 +160,73 @@ func ValidateWithOptions(sql string, options ValidationOptions) ValidationResult
 		}
 	}
 	return result
+}
+
+// polyglotStrictSyntaxDiagnostic mirrors Polyglot's strict_syntax E005 check.
+// It runs after parsing succeeds and deliberately reports only the first
+// trailing comma. Comments are trivia in Polyglot's tokenizer, so skip our
+// explicit comment tokens when finding the following clause boundary.
+func polyglotStrictSyntaxDiagnostic(tokens []Token) (Diagnostic, bool) {
+	for index, token := range tokens {
+		if token.Text != "," {
+			continue
+		}
+
+		next := Token{Kind: TokenEOF}
+		for following := index + 1; following < len(tokens); following++ {
+			if tokens[following].Kind == TokenComment {
+				continue
+			}
+			next = tokens[following]
+			break
+		}
+		boundary, ok := polyglotStrictSyntaxBoundary(next)
+		if !ok {
+			continue
+		}
+		return Diagnostic{
+			Severity: SeverityError,
+			Code:     "E005",
+			Message:  fmt.Sprintf("Trailing comma before %s is not allowed in strict syntax mode", boundary),
+			Span:     token.Span,
+			Found:    token.Kind,
+		}, true
+	}
+	return Diagnostic{}, false
+}
+
+func polyglotStrictSyntaxBoundary(token Token) (string, bool) {
+	if token.Kind == TokenEOF || token.Text == ";" {
+		return "end of statement", true
+	}
+	switch {
+	case token.IsWord("FROM"):
+		return "FROM", true
+	case token.IsWord("WHERE"):
+		return "WHERE", true
+	case token.IsWord("GROUP"):
+		return "GROUP BY", true
+	case token.IsWord("HAVING"):
+		return "HAVING", true
+	case token.IsWord("ORDER"):
+		return "ORDER BY", true
+	case token.IsWord("LIMIT"):
+		return "LIMIT", true
+	case token.IsWord("OFFSET"):
+		return "OFFSET", true
+	case token.IsWord("UNION"):
+		return "UNION", true
+	case token.IsWord("INTERSECT"):
+		return "INTERSECT", true
+	case token.IsWord("EXCEPT"):
+		return "EXCEPT", true
+	case token.IsWord("QUALIFY"):
+		return "QUALIFY", true
+	case token.IsWord("WINDOW"):
+		return "WINDOW", true
+	default:
+		return "", false
+	}
 }
 
 type validationCollector struct {

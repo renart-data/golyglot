@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from compare_core_benchmarks import comparison_markdown, read_samples
+from compare_core_benchmarks import comparison_markdown, read_samples, slower_benchmarks
 
 
 class CompareCoreBenchmarksTest(unittest.TestCase):
@@ -49,6 +49,20 @@ class CompareCoreBenchmarksTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "expected 'golyglot'"):
                 read_samples(samples, "golyglot")
+
+    def test_identifies_only_slower_parse_benchmarks(self) -> None:
+        golyglot = {
+            "parse/simple": {1: 120.0, 2: 130.0, 3: 140.0},
+            "transpile/simple": {1: 300.0, 2: 300.0, 3: 300.0},
+        }
+        polyglot = {
+            "parse/simple": {1: 100.0, 2: 100.0, 3: 100.0},
+            "transpile/simple": {1: 100.0, 2: 100.0, 3: 100.0},
+        }
+
+        regressions = slower_benchmarks(golyglot, polyglot, "parse/")
+        self.assertEqual([benchmark for benchmark, _ in regressions], ["parse/simple"])
+        self.assertAlmostEqual(regressions[0][1], 1.3)
 
 
 if __name__ == "__main__":

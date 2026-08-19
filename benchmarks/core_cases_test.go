@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/renart-data/golyglot"
+	"github.com/renart-data/golyglot/pkg/golyglot"
 )
 
 func TestCoreComparisonCases(t *testing.T) {
