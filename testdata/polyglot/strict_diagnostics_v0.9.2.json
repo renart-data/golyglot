@@ -1,0 +1,254 @@
+{
+  "polyglot_version": "0.9.2",
+  "polyglot_commit": "44ab8f9473039f143a2907e0e64001606b3c05e4",
+  "cases": [
+    {
+      "dialect": "generic",
+      "sql": "SELECT * FROM users WHERE",
+      "kind": "parse",
+      "message": "Unexpected token: Where",
+      "display": "Parse error at line 1, column 26: Unexpected token: Where",
+      "line": 1,
+      "column": 26,
+      "start": 20,
+      "end": 25
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT (1 + 2",
+      "kind": "parse",
+      "message": "Expected RParen, got end of input ('') near [1 + 2]",
+      "display": "Parse error at line 1, column 14: Expected RParen, got end of input ('') near [1 + 2]",
+      "line": 1,
+      "column": 14,
+      "start": 12,
+      "end": 13
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT * FROM users WHERE a AND",
+      "kind": "parse",
+      "message": "Unexpected token: And",
+      "display": "Parse error at line 1, column 32: Unexpected token: And",
+      "line": 1,
+      "column": 32,
+      "start": 28,
+      "end": 31
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT a,, b FROM users",
+      "kind": "parse",
+      "message": "Unexpected token: Comma",
+      "display": "Parse error at line 1, column 11: Unexpected token: Comma",
+      "line": 1,
+      "column": 11,
+      "start": 9,
+      "end": 10
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT 'unclosed string",
+      "kind": "tokenize",
+      "message": "Unterminated string",
+      "display": "Tokenization error at line 1, column 24: Unterminated string",
+      "line": 1,
+      "column": 24,
+      "start": 7,
+      "end": 23
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT 1 + 2)",
+      "kind": "parse",
+      "message": "Invalid expression / Unexpected token",
+      "display": "Parse error at line 1, column 14: Invalid expression / Unexpected token",
+      "line": 1,
+      "column": 14,
+      "start": 12,
+      "end": 13
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT x IN",
+      "kind": "parse",
+      "message": "Unexpected token: In",
+      "display": "Parse error at line 1, column 12: Unexpected token: In",
+      "line": 1,
+      "column": 12,
+      "start": 9,
+      "end": 11
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT * FROM users JOIN",
+      "kind": "parse",
+      "message": "Expected table name or subquery, got Join",
+      "display": "Parse error at line 1, column 25: Expected table name or subquery, got Join",
+      "line": 1,
+      "column": 25,
+      "start": 20,
+      "end": 24
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT * FROM users\nWHERE a AND",
+      "kind": "parse",
+      "message": "Unexpected token: And",
+      "display": "Parse error at line 2, column 12: Unexpected token: And",
+      "line": 2,
+      "column": 12,
+      "start": 28,
+      "end": 31
+    },
+    {
+      "dialect": "postgresql",
+      "sql": "SELECT * FROM UNNEST()",
+      "kind": "parse",
+      "message": "Expected expression in UNNEST",
+      "display": "Parse error at line 1, column 23: Expected expression in UNNEST",
+      "line": 1,
+      "column": 23,
+      "start": 21,
+      "end": 22
+    },
+    {
+      "dialect": "clickhouse",
+      "sql": "SELECT 1 ? : 2",
+      "kind": "parse",
+      "message": "Expected true expression after ? in ClickHouse ternary",
+      "display": "Parse error at line 1, column 13: Expected true expression after ? in ClickHouse ternary",
+      "line": 1,
+      "column": 13,
+      "start": 11,
+      "end": 12
+    },
+    {
+      "dialect": "generic",
+      "sql": "IF(a > 0, a, b, c)",
+      "kind": "parse",
+      "message": "IF function requires 2 or 3 arguments",
+      "display": "Parse error at line 1, column 19: IF function requires 2 or 3 arguments",
+      "line": 1,
+      "column": 19,
+      "start": 17,
+      "end": 18
+    },
+    {
+      "dialect": "generic",
+      "sql": "IF(a > 0)",
+      "kind": "parse",
+      "message": "IF function requires 2 or 3 arguments",
+      "display": "Parse error at line 1, column 10: IF function requires 2 or 3 arguments",
+      "line": 1,
+      "column": 10,
+      "start": 8,
+      "end": 9
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT CASE FROM x",
+      "kind": "parse",
+      "message": "Unexpected token: From",
+      "display": "Parse error at line 1, column 17: Unexpected token: From",
+      "line": 1,
+      "column": 17,
+      "start": 12,
+      "end": 16
+    },
+    {
+      "dialect": "generic",
+      "sql": "WITH cte AS (SELECT * FROM x)",
+      "kind": "parse",
+      "message": "Unexpected end of input",
+      "display": "Parse error at line 1, column 30: Unexpected end of input",
+      "line": 1,
+      "column": 30,
+      "start": 28,
+      "end": 29
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT foo( FROM bar",
+      "kind": "parse",
+      "message": "Unexpected token: From",
+      "display": "Parse error at line 1, column 17: Unexpected token: From",
+      "line": 1,
+      "column": 17,
+      "start": 12,
+      "end": 16
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT A[:",
+      "kind": "parse",
+      "message": "Expected RBracket, got end of input ('') near [A[:]",
+      "display": "Parse error at line 1, column 11: Expected RBracket, got end of input ('') near [A[:]",
+      "line": 1,
+      "column": 11,
+      "start": 9,
+      "end": 10
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT FROM x ORDER BY",
+      "kind": "parse",
+      "message": "Unexpected token: By",
+      "display": "Parse error at line 1, column 23: Unexpected token: By",
+      "line": 1,
+      "column": 23,
+      "start": 20,
+      "end": 22
+    }
+  ],
+  "strict_validation_cases": [
+    {
+      "dialect": "generic",
+      "sql": "SELECT name, FROM employees",
+      "code": "E005",
+      "message": "Trailing comma before FROM is not allowed in strict syntax mode",
+      "line": 1,
+      "column": 13
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT name FROM employees, WHERE salary > 10",
+      "code": "E005",
+      "message": "Trailing comma before WHERE is not allowed in strict syntax mode",
+      "line": 1,
+      "column": 28
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT a, -- keep\nFROM t",
+      "code": "E005",
+      "message": "Trailing comma before FROM is not allowed in strict syntax mode",
+      "line": 1,
+      "column": 10
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT a,",
+      "code": "E005",
+      "message": "Trailing comma before end of statement is not allowed in strict syntax mode",
+      "line": 1,
+      "column": 10
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT a, ORDER BY a",
+      "code": "E005",
+      "message": "Trailing comma before ORDER BY is not allowed in strict syntax mode",
+      "line": 1,
+      "column": 10
+    },
+    {
+      "dialect": "generic",
+      "sql": "SELECT a, UNION SELECT b",
+      "code": "E005",
+      "message": "Trailing comma before UNION is not allowed in strict syntax mode",
+      "line": 1,
+      "column": 10
+    }
+  ]
+}

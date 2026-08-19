@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/renart-data/golyglot"
+	"github.com/renart-data/golyglot/pkg/golyglot"
 )
 
 // The full compatibility corpus is opt-in because it is intentionally much
@@ -267,7 +267,11 @@ func runFullPrettyFixtures(t *testing.T, path string) fullFixtureStats {
 	fixture := readFullJSON[prettyFixture](t, path)
 	var stats fullFixtureStats
 	for index, test := range fixture.Tests {
-		got, err := golyglot.FormatOne(test.Input, golyglot.DialectGeneric)
+		var got string
+		err := validateFullLosslessParse(test.Input, golyglot.DialectGeneric)
+		if err == nil {
+			got, err = golyglot.FormatOne(test.Input, golyglot.DialectGeneric)
+		}
 		stats.record(fmt.Sprintf("pretty:%d", index), test.Input, strings.TrimSpace(test.Expected), strings.TrimSpace(got), err)
 	}
 	return stats
@@ -397,10 +401,62 @@ func generateFullGeneric(sql string, pretty bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := validateFullLosslessResult(result); err != nil {
+		return "", err
+	}
 	if len(result.Statements) != 1 {
 		return "", fmt.Errorf("expected one statement, got %d", len(result.Statements))
 	}
 	return golyglot.GenerateWithOptions(result.Statements[0].Node, golyglot.GenerateOptions{Pretty: pretty})
+}
+
+func validateFullLosslessParse(sql string, dialect golyglot.Dialect) error {
+	result, err := golyglot.ParseStrict(sql, dialect)
+	if err != nil {
+		return err
+	}
+	return validateFullLosslessResult(result)
+}
+
+func validateFullLosslessResult(result golyglot.ParseResult) error {
+	if result.OriginalSQL() != result.SQL {
+		return fmt.Errorf("OriginalSQL changed the input")
+	}
+	cursor := 0
+	for index, token := range result.Tokens {
+		gap, ok := result.SourceGapBefore(index)
+		if !ok || gap.Start != cursor || gap.End != token.Span.Start {
+			return fmt.Errorf("invalid source gap before token %d: gap=%#v token=%#v", index, gap, token)
+		}
+		if token.Kind != golyglot.TokenEOF {
+			text, ok := result.SourceSlice(token.Span)
+			if !ok || text != token.Text {
+				return fmt.Errorf("token %d is not source-backed: token=%#v source=%q", index, token, text)
+			}
+		}
+		cursor = token.Span.End
+	}
+	if cursor != len(result.SQL) {
+		return fmt.Errorf("token/gap coverage ends at byte %d, want %d", cursor, len(result.SQL))
+	}
+	for statementIndex, statement := range result.Statements {
+		if !statement.Span.Valid(len(result.SQL)) || statement.Span.Empty() {
+			return fmt.Errorf("statement %d has invalid source span %#v", statementIndex, statement.Span)
+		}
+		var spanErr error
+		golyglot.Walk(statement.Node, func(node golyglot.Node) golyglot.VisitAction {
+			span := node.SourceSpan()
+			if !span.IsSynthetic() && (!span.Valid(len(result.SQL)) || span.Empty()) {
+				spanErr = fmt.Errorf("%T has invalid source span %#v", node, span)
+				return golyglot.Stop
+			}
+			return golyglot.VisitChildren
+		})
+		if spanErr != nil {
+			return spanErr
+		}
+	}
+	return nil
 }
 
 func fullTranspile(sql string, from, to golyglot.Dialect, expected string, targetVersion ...string) (string, error) {
@@ -412,6 +468,9 @@ func fullIdentityTranspile(sql string, from, to golyglot.Dialect, expected strin
 }
 
 func fullTranspileWithOptions(sql string, from, to golyglot.Dialect, expected string, options golyglot.TranspileOptions, targetVersion ...string) (string, error) {
+	if err := validateFullLosslessParse(sql, from); err != nil {
+		return "", err
+	}
 	if len(targetVersion) > 0 {
 		options.DialectVersion = targetVersion[0]
 	}

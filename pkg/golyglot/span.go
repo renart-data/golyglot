@@ -13,9 +13,16 @@ type Span struct {
 
 func (s Span) Empty() bool { return s.Start == s.End }
 
+// IsSynthetic reports whether a node has no direct origin in the input. The
+// parser uses this sentinel for semantic nodes introduced while normalizing
+// source syntax; it is never a valid TextEdit range.
+func (s Span) IsSynthetic() bool { return s.Start == -1 && s.End == -1 }
+
 func (s Span) Valid(textLen int) bool {
 	return s.Start >= 0 && s.End >= s.Start && s.End <= textLen
 }
+
+func syntheticSpan() Span { return Span{Start: -1, End: -1} }
 
 func mergeSpans(first, last Span) Span {
 	return Span{Start: first.Start, End: last.End}

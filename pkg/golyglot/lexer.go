@@ -1,6 +1,7 @@
 package golyglot
 
 import (
+	"fmt"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -177,6 +178,13 @@ func (l *lexer) run() {
 		default:
 			l.pos += runeWidth(l.text[l.pos:])
 			l.emit(TokenUnknown, start, l.pos)
+			l.diagnostics = append(l.diagnostics, Diagnostic{
+				Severity: SeverityError,
+				Code:     "LEX_UNEXPECTED_CHARACTER",
+				Message:  fmt.Sprintf("unexpected character %q", l.text[start:l.pos]),
+				Span:     Span{Start: start, End: l.pos},
+				Found:    TokenUnknown,
+			})
 		}
 	}
 
@@ -713,7 +721,7 @@ func isSpaceAt(text string, pos int) bool {
 
 func isPunctuation(c byte) bool {
 	switch c {
-	case '(', ')', ',', '.', ';', '[', ']':
+	case '(', ')', ',', '.', ';', '[', ']', '{', '}':
 		return true
 	default:
 		return false

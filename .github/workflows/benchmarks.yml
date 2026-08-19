@@ -143,7 +143,7 @@ jobs:
       CARGO_BUILD_JOBS: "1"
       CARGO_INCREMENTAL: "0"
       GO_VERSION: 1.25.12
-      POLYGLOT_REF: d5aa0d493c281398c9fdbc6febd3577f10ceac2f
+      POLYGLOT_REF: 44ab8f9473039f143a2907e0e64001606b3c05e4
       RUST_TOOLCHAIN: 1.97.1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -340,6 +340,7 @@ jobs:
             --golyglot-binary "$RUNNER_TEMP/golyglot-core-bench" \
             --polyglot-binary "$RUNNER_TEMP/polyglot-core-bench" \
             --minimum-samples "$CORE_SAMPLES" \
+            --fail-if-golyglot-parse-slower \
             --output "$RUNNER_TEMP/core-comparison.md"
           {
             echo "# Fully optimized Golyglot / Polyglot comparison"

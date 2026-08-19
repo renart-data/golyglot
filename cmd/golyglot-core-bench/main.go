@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/renart-data/golyglot"
+	"github.com/renart-data/golyglot/pkg/golyglot"
 )
 
 const batchSize = 64

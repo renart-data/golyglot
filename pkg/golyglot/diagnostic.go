@@ -41,13 +41,55 @@ func (d Diagnostic) Error() string {
 
 type SyntaxError struct {
 	Diagnostic Diagnostic
+	// Polyglot is the strict-mode compatibility projection. Diagnostic keeps
+	// Golyglot's richer recovery-oriented detail for editor integrations.
+	Polyglot PolyglotDiagnostic
 }
 
 func (e *SyntaxError) Error() string {
+	if e.Polyglot.Kind != PolyglotErrorUnknown {
+		return e.Polyglot.Error()
+	}
 	return e.Diagnostic.Error()
 }
 
 func (e *SyntaxError) Unwrap() error { return nil }
+
+// PolyglotErrorKind identifies the public syntax-error variants exposed by
+// Polyglot's Rust API.
+type PolyglotErrorKind uint8
+
+const (
+	PolyglotErrorUnknown PolyglotErrorKind = iota
+	PolyglotErrorTokenize
+	PolyglotErrorParse
+	PolyglotErrorSyntax
+)
+
+// PolyglotDiagnostic is the primary diagnostic returned by strict parsing.
+// Line and Column are 1-based; Span remains a half-open byte range.
+type PolyglotDiagnostic struct {
+	Kind    PolyglotErrorKind
+	Message string
+	Line    int
+	Column  int
+	Span    Span
+}
+
+func (d PolyglotDiagnostic) Error() string {
+	prefix := ""
+	switch d.Kind {
+	case PolyglotErrorTokenize:
+		prefix = "Tokenization"
+	case PolyglotErrorParse:
+		prefix = "Parse"
+	case PolyglotErrorSyntax:
+		prefix = "Syntax"
+	default:
+		return d.Message
+	}
+	return fmt.Sprintf("%s error at line %d, column %d: %s", prefix, d.Line, d.Column, d.Message)
+}
 
 type GuardError struct {
 	Code    string

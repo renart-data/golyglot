@@ -6,7 +6,7 @@ description: Add golyglot to a Go program.
 ## Install
 
 ```sh
-go get github.com/renart-data/golyglot
+go get github.com/renart-data/golyglot/pkg/golyglot
 ```
 
 ## Parse tolerant SQL
@@ -17,7 +17,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/renart-data/golyglot"
+	"github.com/renart-data/golyglot/pkg/golyglot"
 )
 
 func main() {

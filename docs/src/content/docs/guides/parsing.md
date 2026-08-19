@@ -13,6 +13,24 @@ for _, diagnostic := range result.Diagnostics {
 }
 ```
 
+The parsed document is byte-for-byte lossless even though whitespace is not
+materialized as tokens. `OriginalSQL` returns the untouched input,
+`SourceSlice` reads any valid byte span, and `SourceGapBefore` exposes the
+whitespace between tokens (including trailing whitespace before EOF). Apply
+targeted changes without reformatting the rest of the document:
+
+```go
+edit, err := result.EditForNode(node, "replacement")
+if err != nil {
+	panic(err) // synthetic and recovery-only nodes do not own source bytes
+}
+updated, err := result.ApplyEdits(edit)
+```
+
+Edits may be passed in any order and must not overlap. Comments and every
+untouched byte remain exactly where they appeared in the input. Use AST
+generation when canonical SQL is the desired output instead.
+
 For complete input, generate canonical SQL from a typed node:
 
 ```go
@@ -21,6 +39,11 @@ statement, _, err := golyglot.ParseOne(sql, golyglot.ParseOptions{
 	Mode:    golyglot.Strict,
 })
 if err != nil {
+	var syntaxError *golyglot.SyntaxError
+	if errors.As(err, &syntaxError) {
+		// Polyglot-compatible strict kind, message, 1-based position, and span.
+		fmt.Println(syntaxError.Polyglot)
+	}
 	panic(err)
 }
 

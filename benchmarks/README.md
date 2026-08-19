@@ -5,9 +5,12 @@ core using matching query-size cases and a PostgreSQL-to-MySQL transpilation
 path. Results are machine-specific; keep the Go and Rust runs on the same
 machine and record the commit, Go/Rust versions, CPU, and OS with any report.
 
-The original comparison target is Polyglot commit `d5aa0d4` (the repository
-revision used while this benchmark was added). It is the Rust library itself,
-not the original cgo/FFI client.
+The checked-in fixture snapshot, released-library comparison, and local
+Criterion targets remain pinned to Polyglot v0.9.1 commit `d5aa0d4`. The
+manually dispatched optimized-core CI comparison independently pins Polyglot
+v0.9.2 commit `44ab8f9`, so parser performance is checked against the current
+Rust release without silently changing the compatibility corpus. Core
+comparisons use the Rust library itself, not the original cgo/FFI client.
 
 ## Go
 
@@ -169,9 +172,10 @@ parser-only target.
 
 The manually dispatched `.github/workflows/benchmarks.yml` workflow moves the
 memory-heavy comparison to GitHub Actions. Its optimized core job builds the
-pinned Polyglot commit with the unmodified Cargo `bench` profile: optimization
-level 3, full LTO, and one codegen unit. It uses one Cargo build job and adds
-swap headroom on smaller hosted runners instead of weakening those settings.
+pinned Polyglot v0.9.2 commit with the unmodified Cargo `bench` profile:
+optimization level 3, full LTO, and one codegen unit. It uses one Cargo build
+job and adds swap headroom on smaller hosted runners instead of weakening
+those settings.
 
 Golyglot and Polyglot then run as stripped standalone executables in the same
 job, on the same pinned CPU, reading the same SQL files from `core_cases/`.
@@ -179,7 +183,8 @@ Every transpilation result must match exactly before timing. Ten one-second
 samples per parse/transpile case are paired and their execution order is
 alternated; the report includes a paired-bootstrap interval, raw samples,
 pinned Go/Rust toolchains, CPU details, input and binary hashes, and peak build
-memory.
+memory. The job fails if any parser case has a slower paired median than
+Polyglot; transpilation remains reporting-only.
 
 The report also compares the stripped executables' on-disk and ELF section
 sizes. This is a linked runner-footprint comparison, not a claim that a Go

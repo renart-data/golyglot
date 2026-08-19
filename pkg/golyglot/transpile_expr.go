@@ -4538,7 +4538,11 @@ func renderOrderItemsCompact(items []OrderItem) string {
 }
 
 func identifierExpr(name string) *IdentifierExpr {
-	return &IdentifierExpr{Parts: []Identifier{{Text: name}}}
+	return identifierExprAt(name, syntheticSpan())
+}
+
+func identifierExprAt(name string, span Span) *IdentifierExpr {
+	return &IdentifierExpr{nodeBase: nodeBase{span: span}, Parts: []Identifier{{Text: name, Span: span}}}
 }
 
 func isTrueLiteral(expression Expr) bool {
