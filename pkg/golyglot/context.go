@@ -68,36 +68,36 @@ func (p *parser) recordCursorContext(kind SyntacticContextKind, priority int, ex
 
 func (p *parser) recordSelectContext(statement *SelectStmt) {
 	const priority = 40
-	setOperators := keywordExpectations("UNION", "INTERSECT", "EXCEPT")
+	setOperators := expectedKeywords("UNION", "INTERSECT", "EXCEPT")
 	switch {
 	case statement.Fetch != nil || statement.Offset != nil || statement.Limit != nil:
-		p.recordCursorContext(ContextLimit, priority, append(keywordExpectations("OFFSET", "FETCH"), setOperators...)...)
+		p.recordCursorContext(ContextLimit, priority, append(expectedKeywords("OFFSET", "FETCH"), setOperators...)...)
 	case len(statement.OrderBy) > 0 || len(statement.SortBy) > 0:
 		expected := []ExpectedSyntax{{Kind: ExpectedToken, Text: ","}}
-		expected = append(expected, keywordExpectations("LIMIT", "OFFSET", "FETCH")...)
+		expected = append(expected, expectedKeywords("LIMIT", "OFFSET", "FETCH")...)
 		expected = append(expected, setOperators...)
 		p.recordCursorContext(ContextOrderBy, priority, expected...)
 	case len(statement.Windows) > 0:
-		p.recordCursorContext(ContextWindow, priority, append(keywordExpectations("QUALIFY", "ORDER", "LIMIT", "OFFSET", "FETCH"), setOperators...)...)
+		p.recordCursorContext(ContextWindow, priority, append(expectedKeywords("QUALIFY", "ORDER", "LIMIT", "OFFSET", "FETCH"), setOperators...)...)
 	case statement.Qualify != nil:
-		p.recordCursorContext(ContextQualify, priority, append(keywordExpectations("AND", "OR", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH"), setOperators...)...)
+		p.recordCursorContext(ContextQualify, priority, append(expectedKeywords("AND", "OR", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH"), setOperators...)...)
 	case statement.Having != nil:
-		p.recordCursorContext(ContextHaving, priority, append(keywordExpectations("AND", "OR", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH"), setOperators...)...)
+		p.recordCursorContext(ContextHaving, priority, append(expectedKeywords("AND", "OR", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH"), setOperators...)...)
 	case len(statement.GroupBy) > 0:
 		expected := []ExpectedSyntax{{Kind: ExpectedToken, Text: ","}}
-		expected = append(expected, keywordExpectations("HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH")...)
+		expected = append(expected, expectedKeywords("HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH")...)
 		expected = append(expected, setOperators...)
 		p.recordCursorContext(ContextGroupBy, priority, expected...)
 	case statement.Where != nil:
-		p.recordCursorContext(ContextWhere, priority, append(keywordExpectations("AND", "OR", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH"), setOperators...)...)
+		p.recordCursorContext(ContextWhere, priority, append(expectedKeywords("AND", "OR", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH"), setOperators...)...)
 	case len(statement.From) > 0:
 		expected := []ExpectedSyntax{{Kind: ExpectedToken, Text: ","}}
-		expected = append(expected, keywordExpectations("JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "WHERE", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH")...)
+		expected = append(expected, expectedKeywords("JOIN", "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "WHERE", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH")...)
 		expected = append(expected, setOperators...)
 		p.recordCursorContext(ContextFrom, priority, expected...)
 	default:
 		expected := []ExpectedSyntax{{Kind: ExpectedToken, Text: ","}}
-		expected = append(expected, keywordExpectations("FROM", "WHERE", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH")...)
+		expected = append(expected, expectedKeywords("FROM", "WHERE", "GROUP", "HAVING", "QUALIFY", "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH")...)
 		expected = append(expected, setOperators...)
 		p.recordCursorContext(ContextSelectList, priority, expected...)
 	}
@@ -108,7 +108,7 @@ func (p *parser) recordInsertContext(statement *InsertStmt) {
 		return
 	}
 	expected := []ExpectedSyntax{{Kind: ExpectedToken, Text: ","}}
-	expected = append(expected, keywordExpectations("ON", "RETURNING")...)
+	expected = append(expected, expectedKeywords("ON", "RETURNING")...)
 	p.recordCursorContext(ContextInsert, 40, expected...)
 }
 
@@ -117,7 +117,7 @@ func (p *parser) recordUpdateContext(statement *UpdateStmt) {
 		return
 	}
 	expected := []ExpectedSyntax{{Kind: ExpectedToken, Text: ","}}
-	expected = append(expected, keywordExpectations("FROM", "WHERE", "RETURNING")...)
+	expected = append(expected, expectedKeywords("FROM", "WHERE", "RETURNING")...)
 	p.recordCursorContext(ContextUpdate, 40, expected...)
 }
 
@@ -125,15 +125,7 @@ func (p *parser) recordDeleteContext(statement *DeleteStmt) {
 	if len(statement.Table) == 0 {
 		return
 	}
-	p.recordCursorContext(ContextDelete, 40, keywordExpectations("USING", "WHERE", "RETURNING")...)
-}
-
-func keywordExpectations(words ...string) []ExpectedSyntax {
-	expected := make([]ExpectedSyntax, len(words))
-	for index, word := range words {
-		expected[index] = ExpectedSyntax{Kind: ExpectedKeyword, Text: word}
-	}
-	return expected
+	p.recordCursorContext(ContextDelete, 40, expectedKeywords("USING", "WHERE", "RETURNING")...)
 }
 
 // SyntacticContextAt parses the document prefix at cursor with the same
@@ -252,6 +244,8 @@ func contextKindForDiagnostic(diagnostic Diagnostic) (SyntacticContextKind, int)
 	switch diagnostic.Code {
 	case "PARSE_EXPECTED_INSERT_SOURCE":
 		return ContextInsert, 90
+	case "PARSE_INCOMPLETE_COMMAND":
+		return ContextStatement, 90
 	case "PARSE_EXPECTED_TABLE":
 		if strings.Contains(message, "JOIN") {
 			return ContextJoin, 90

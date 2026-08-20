@@ -93,6 +93,45 @@ func TestTolerantIncompleteDMLKeepsTypedStatements(t *testing.T) {
 	}
 }
 
+func TestTolerantIncompleteValuesKeepsQueryShape(t *testing.T) {
+	result := ParseTolerant("VALUES", DialectGeneric)
+	if len(result.Statements) != 1 || result.Statements[0].Node.Kind() != NodeSelectStatement {
+		t.Fatalf("statements = %#v, want a VALUES query", result.Statements)
+	}
+	requireDiagnosticCode(t, result.Diagnostics, "PARSE_EXPECTED_EXPRESSION")
+	statement := result.Statements[0].Node.(*SelectStmt)
+	if len(statement.ValuesRows) != 1 || len(statement.ValuesRows[0]) != 1 {
+		t.Fatalf("VALUES rows = %#v, want one recovered row", statement.ValuesRows)
+	}
+	if _, ok := statement.ValuesRows[0][0].(*MissingExpr); !ok {
+		t.Fatalf("VALUES expression = %T, want *MissingExpr", statement.ValuesRows[0][0])
+	}
+}
+
+func TestTolerantIncompleteCommandsExposeExpectedValue(t *testing.T) {
+	for _, sql := range []string{"SET", "USE"} {
+		t.Run(sql, func(t *testing.T) {
+			result := ParseTolerant(sql, DialectGeneric)
+			if len(result.Statements) != 1 || result.Statements[0].Node.Kind() != NodeCommand {
+				t.Fatalf("statements = %#v, want a command", result.Statements)
+			}
+			diagnostic := requireDiagnosticCode(t, result.Diagnostics, "PARSE_INCOMPLETE_COMMAND")
+			if !containsExpectedSyntax(diagnostic.Expected, ExpectedSyntax{Kind: ExpectedIdentifier}) {
+				t.Fatalf("expected syntax = %#v, want identifier", diagnostic.Expected)
+			}
+		})
+	}
+}
+
+func TestIncompleteRawStatementHasKeywordSpecificExpectations(t *testing.T) {
+	result := ParseTolerant("CREATE", DialectGeneric)
+	diagnostic := requireDiagnosticCode(t, result.Diagnostics, "PARSE_INCOMPLETE_STATEMENT")
+	if !containsExpectedSyntax(diagnostic.Expected, ExpectedSyntax{Kind: ExpectedKeyword, Text: "TABLE"}) ||
+		!containsExpectedSyntax(diagnostic.Expected, ExpectedSyntax{Kind: ExpectedKeyword, Text: "VIEW"}) {
+		t.Fatalf("expected syntax = %#v, want CREATE object kinds", diagnostic.Expected)
+	}
+}
+
 func TestTolerantCreateTableReportsUnclosedBody(t *testing.T) {
 	const sql = "CREATE TABLE events (id BIGINT"
 	result := ParseTolerant(sql, DialectGeneric)

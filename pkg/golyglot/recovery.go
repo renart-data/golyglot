@@ -1,5 +1,7 @@
 package golyglot
 
+import "strings"
+
 // RecoveryKind identifies syntax retained outside the semantic AST while the
 // parser continues through incomplete input. Recovery elements are a sidecar
 // produced by the same parser; they do not form a second grammar or tree.
@@ -62,6 +64,33 @@ func defaultExpectedSyntax(code string) []ExpectedSyntax {
 	default:
 		return nil
 	}
+}
+
+func rawStatementBodyExpectations(keyword string) []ExpectedSyntax {
+	switch strings.ToUpper(keyword) {
+	case "CREATE":
+		return expectedKeywords("TABLE", "VIEW", "MATERIALIZED", "TEMPORARY", "SCHEMA", "DATABASE", "FUNCTION", "INDEX")
+	case "ALTER":
+		return expectedKeywords("TABLE", "VIEW", "SCHEMA", "DATABASE", "FUNCTION")
+	case "DROP":
+		return expectedKeywords("TABLE", "VIEW", "SCHEMA", "DATABASE", "FUNCTION", "INDEX")
+	case "MERGE":
+		return expectedKeywords("INTO")
+	case "EXPLAIN":
+		return expectedKeywords("SELECT", "WITH", "INSERT", "UPDATE", "DELETE")
+	case "CALL", "EXEC", "EXECUTE":
+		return []ExpectedSyntax{{Kind: ExpectedIdentifier}}
+	default:
+		return []ExpectedSyntax{{Kind: ExpectedStatement}}
+	}
+}
+
+func expectedKeywords(words ...string) []ExpectedSyntax {
+	expected := make([]ExpectedSyntax, len(words))
+	for index, word := range words {
+		expected[index] = ExpectedSyntax{Kind: ExpectedKeyword, Text: word}
+	}
+	return expected
 }
 
 func mergeExpectedSyntax(existing, additional []ExpectedSyntax) []ExpectedSyntax {

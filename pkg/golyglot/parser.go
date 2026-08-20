@@ -49,6 +49,8 @@ func (p *parser) parseStatements() []Statement {
 			node = p.parseParenthesizedQueryStatement()
 		} else if tok.IsWord("CREATE") && p.startsCreateTable() {
 			node = p.parseCreateTable()
+		} else if tok.IsWord("SET") || (tok.IsWord("USE") && p.options.Mode == Tolerant) {
+			node = p.parseCommand()
 		} else if tok.IsWord("CREATE") || (tok.IsWord("WITH") && p.startsWithWithNonQuery()) || p.isStatementKeyword(tok) {
 			switch {
 			case tok.IsWord("INSERT") && p.startsRecoverableInsert():
@@ -62,8 +64,6 @@ func (p *parser) parseStatements() []Statement {
 			default:
 				node = p.parseRawStatement()
 			}
-		} else if tok.IsWord("SET") || tok.IsWord("USE") {
-			node = p.parseCommand()
 		} else if p.options.Dialect == DialectMySQL && (tok.IsWord("LOCK") || tok.IsWord("UNLOCK")) {
 			node = p.parseRawStatement()
 		} else if p.options.Dialect == DialectMySQL && (tok.IsWord("MATCH") || strings.HasPrefix(strings.ToUpper(tok.Text), "_UTF8") || strings.HasPrefix(strings.ToUpper(tok.Text), "_LATIN1")) {
@@ -163,6 +163,7 @@ func (p *parser) parseRawStatement() Node {
 			Code:     "PARSE_INCOMPLETE_STATEMENT",
 			Message:  fmt.Sprintf("incomplete %s statement; expected a statement body", strings.ToUpper(keyword)),
 			Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+			Expected: rawStatementBodyExpectations(keyword),
 			Found:    p.peek().Kind,
 			Recovery: RecoveryInserted,
 		})
@@ -507,12 +508,25 @@ func (p *parser) parseParenthesizedQueryStatement() *SelectStmt {
 func (p *parser) parseCommand() Node {
 	start := p.peek().Span.Start
 	keyword := p.advance().Text
+	body := false
 	for p.peek().Kind != TokenEOF && p.peek().Text != ";" {
 		p.advance()
+		body = true
 	}
 	end := p.lastEnd
 	if end < start {
 		end = start
+	}
+	if p.options.Mode == Tolerant && !body {
+		p.report(Diagnostic{
+			Severity: SeverityError,
+			Code:     "PARSE_INCOMPLETE_COMMAND",
+			Message:  fmt.Sprintf("incomplete %s command; expected a value", strings.ToUpper(keyword)),
+			Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+			Expected: []ExpectedSyntax{{Kind: ExpectedIdentifier}},
+			Found:    p.peek().Kind,
+			Recovery: RecoveryInserted,
+		})
 	}
 	return &CommandStmt{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Keyword: strings.ToUpper(keyword), Raw: p.text[start:end]}
 }
@@ -1448,7 +1462,10 @@ func (p *parser) isValuesQueryStart() bool {
 	for index < len(p.tokens) && p.tokens[index].Kind == TokenComment {
 		index++
 	}
-	return index < len(p.tokens) && p.tokens[index].Kind != TokenEOF && p.tokens[index].Text != "." && p.tokens[index].Text != ";" && p.tokens[index].Text != ")" && p.tokens[index].Text != "," && !p.tokens[index].IsWord("AS")
+	if tokenIndexAtEOF(p.tokens, index) {
+		return p.options.Mode == Tolerant
+	}
+	return p.tokens[index].Text != "." && p.tokens[index].Text != ";" && p.tokens[index].Text != ")" && p.tokens[index].Text != "," && !p.tokens[index].IsWord("AS")
 }
 
 // parseValuesQuery parses the scalar and row forms accepted by SQLGlot. A
@@ -2633,6 +2650,7 @@ func (p *parser) parseTableSample() *TableSample {
 			Code:     "PARSE_EXPECTED_TOKEN",
 			Message:  "expected ( after TABLESAMPLE",
 			Span:     Span{Start: start, End: start},
+			Expected: []ExpectedSyntax{{Kind: ExpectedToken, Text: "("}},
 			Found:    p.peek().Kind,
 			Recovery: RecoveryInserted,
 		})
@@ -3258,6 +3276,7 @@ func (p *parser) parsePostfix(left Expr) Expr {
 					Code:     "PARSE_EXPECTED_TOKEN",
 					Message:  "expected > to close generic expression",
 					Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+					Expected: []ExpectedSyntax{{Kind: ExpectedToken, Text: ">"}},
 					Found:    p.peek().Kind,
 					Recovery: RecoveryInserted,
 				})

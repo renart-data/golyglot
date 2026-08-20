@@ -109,6 +109,28 @@ func TestSyntacticContextAtIncompleteSQL(t *testing.T) {
 			prefix:   "ev",
 			replace:  Span{Start: 12, End: 14},
 		},
+		{
+			name:     "values expression",
+			sql:      "VALUES",
+			kind:     ContextExpression,
+			expected: ExpectedSyntax{Kind: ExpectedExpression},
+			replace:  Span{Start: 6, End: 6},
+		},
+		{
+			name:     "create object prefix",
+			sql:      "CREATE T",
+			kind:     ContextStatement,
+			expected: ExpectedSyntax{Kind: ExpectedKeyword, Text: "TABLE"},
+			prefix:   "T",
+			replace:  Span{Start: 7, End: 8},
+		},
+		{
+			name:     "set value",
+			sql:      "SET ",
+			kind:     ContextStatement,
+			expected: ExpectedSyntax{Kind: ExpectedIdentifier},
+			replace:  Span{Start: 4, End: 4},
+		},
 	}
 
 	for _, test := range tests {
