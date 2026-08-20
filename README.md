@@ -29,6 +29,11 @@ canonical-formatting path. Strict syntax errors retain Golyglot's detailed
 diagnostic and also expose the Polyglot-compatible primary diagnostic through
 `SyntaxError.Polyglot`.
 
+For language-server integrations, `ParseResult.Recoveries` records missing and
+skipped syntax with structured expectations, while `SyntacticContextAt`
+returns cursor-local expectations plus the replacement span and partial token
+prefix. Both are produced by the same parser used for strict parsing.
+
 Supported features:
 
 - 30+ named SQL dialects and pairwise transpilation

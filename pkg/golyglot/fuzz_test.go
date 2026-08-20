@@ -20,3 +20,26 @@ func FuzzTolerantParseNeverPanics(f *testing.F) {
 		}
 	})
 }
+
+func FuzzSyntacticContextNeverPanics(f *testing.F) {
+	for _, seed := range []string{
+		"",
+		"SEL",
+		"SELECT account FR",
+		"SELECT * FROM users WHERE",
+		"UPDATE accounts SET",
+		"WITH recent AS (SELECT 1) SELECT * FROM recent",
+	} {
+		f.Add(seed, len(seed))
+	}
+	f.Fuzz(func(t *testing.T, sql string, cursor int) {
+		if cursor < 0 {
+			cursor = -cursor
+			if cursor < 0 {
+				cursor = 0
+			}
+		}
+		cursor %= len(sql) + 1
+		_, _ = SyntacticContextAt(sql, cursor, DialectGeneric)
+	})
+}

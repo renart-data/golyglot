@@ -17,7 +17,7 @@ type parser struct {
 	nodeCount   int
 	options     ParseOptions
 	diagnostics []Diagnostic
-	recovery    *recoveryState
+	sidecar     *parserSidecar
 }
 
 func (p *parser) parseStatements() []Statement {
@@ -638,6 +638,9 @@ func (p *parser) parseInsert() Node {
 		})
 	}
 	p.captureStatementTail(&stmt.nodeBase, &stmt.Tail)
+	if p.options.Mode == Tolerant && p.sidecar != nil {
+		p.recordInsertContext(stmt)
+	}
 	return stmt
 }
 
@@ -689,6 +692,9 @@ func (p *parser) parseUpdate() Node {
 		stmt.Where = p.parseRequiredExpr("after UPDATE WHERE")
 	}
 	p.captureStatementTail(&stmt.nodeBase, &stmt.Tail)
+	if p.options.Mode == Tolerant && p.sidecar != nil {
+		p.recordUpdateContext(stmt)
+	}
 	return stmt
 }
 
@@ -708,6 +714,9 @@ func (p *parser) parseDelete() Node {
 		stmt.Where = p.parseRequiredExpr("after DELETE WHERE")
 	}
 	p.captureStatementTail(&stmt.nodeBase, &stmt.Tail)
+	if p.options.Mode == Tolerant && p.sidecar != nil {
+		p.recordDeleteContext(stmt)
+	}
 	return stmt
 }
 
@@ -1018,6 +1027,9 @@ func (p *parser) parseSelect() *SelectStmt {
 		end = start
 	}
 	stmt.nodeBase.span = Span{Start: start, End: end}
+	if p.options.Mode == Tolerant && p.sidecar != nil {
+		p.recordSelectContext(stmt)
+	}
 	return stmt
 }
 
@@ -1119,6 +1131,9 @@ func (p *parser) parseGroupByList() []Expr {
 			break
 		}
 		if p.isClauseBoundary() || p.peek().Text == ")" {
+			if p.options.Mode == Tolerant && p.sidecar != nil {
+				p.recordCursorContext(ContextGroupBy, 100, ExpectedSyntax{Kind: ExpectedExpression})
+			}
 			break
 		}
 	}
@@ -1612,6 +1627,9 @@ func (p *parser) parseSelectList() []SelectItem {
 		// Keep that behavior as a dialect policy point rather than emitting
 		// a noisy diagnostic while the user is still typing.
 		if p.isSelectListBoundary() {
+			if p.options.Mode == Tolerant && p.sidecar != nil {
+				p.recordCursorContext(ContextSelectList, 100, ExpectedSyntax{Kind: ExpectedExpression})
+			}
 			break
 		}
 	}
@@ -2768,6 +2786,9 @@ func (p *parser) parseExpressionList(context string) []Expr {
 			break
 		}
 		if p.isClauseBoundary() || p.peek().Text == ")" {
+			if p.options.Mode == Tolerant && p.sidecar != nil {
+				p.recordCursorContext(ContextExpression, 100, ExpectedSyntax{Kind: ExpectedExpression})
+			}
 			break
 		}
 	}
@@ -5877,8 +5898,8 @@ func (p *parser) synchronizeStatement() {
 	if end <= start {
 		return
 	}
-	if p.recovery != nil && len(p.recovery.elements) > 0 {
-		recovery := &p.recovery.elements[len(p.recovery.elements)-1]
+	if p.sidecar != nil && len(p.sidecar.recoveries) > 0 {
+		recovery := &p.sidecar.recoveries[len(p.sidecar.recoveries)-1]
 		if recovery.Kind == RecoverySkipped && recovery.Span.Start == start {
 			recovery.Span.End = end
 			return
@@ -5954,17 +5975,9 @@ func (p *parser) report(diagnostic Diagnostic) {
 	if p.options.Mode == Tolerant && len(p.diagnostics) > 0 {
 		last := &p.diagnostics[len(p.diagnostics)-1]
 		if diagnostic.Recovery == RecoveryInserted && last.Recovery == RecoveryInserted && last.Span == diagnostic.Span && last.Found == diagnostic.Found {
-			last.Expected = mergeExpectedSyntax(last.Expected, diagnostic.Expected)
-			if p.recovery != nil && len(p.recovery.elements) > 0 {
-				recovery := &p.recovery.elements[len(p.recovery.elements)-1]
-				if recovery.Kind == RecoveryMissing && recovery.Span == diagnostic.Span {
-					recovery.Expected = mergeExpectedSyntax(recovery.Expected, diagnostic.Expected)
-				}
-			}
 			return
 		}
 		if diagnostic.Recovery == RecoverySynchronized && last.Recovery == RecoverySynchronized && last.Span == diagnostic.Span {
-			last.Expected = mergeExpectedSyntax(last.Expected, diagnostic.Expected)
 			return
 		}
 	}
@@ -5981,10 +5994,10 @@ func (p *parser) report(diagnostic Diagnostic) {
 }
 
 func (p *parser) appendRecovery(element RecoveryElement) {
-	if p.recovery == nil {
-		p.recovery = &recoveryState{}
+	if p.sidecar == nil {
+		p.sidecar = &parserSidecar{}
 	}
-	p.recovery.elements = append(p.recovery.elements, element)
+	p.sidecar.recoveries = append(p.sidecar.recoveries, element)
 }
 
 func maxInt(a, b int) int {

@@ -138,6 +138,36 @@ func TestTrailingQualifiedNameRecordsMissingIdentifier(t *testing.T) {
 	}
 }
 
+func TestNestedIncompleteConstructsKeepOneRootDiagnostic(t *testing.T) {
+	for _, test := range []struct {
+		sql  string
+		code string
+	}{
+		{sql: "WITH recent AS (", code: "PARSE_EXPECTED_QUERY"},
+		{sql: "SELECT CASE WHEN", code: "PARSE_EXPECTED_EXPRESSION"},
+		{sql: "SELECT COALESCE(", code: "PARSE_EXPECTED_EXPRESSION"},
+		{sql: "SELECT (1 +", code: "PARSE_EXPECTED_EXPRESSION"},
+		{sql: "SELECT * FROM users JOIN", code: "PARSE_EXPECTED_TABLE"},
+	} {
+		t.Run(test.sql, func(t *testing.T) {
+			result := ParseTolerant(test.sql, DialectGeneric)
+			requireDiagnosticCode(t, result.Diagnostics, test.code)
+			errorCount := 0
+			for _, diagnostic := range result.Diagnostics {
+				if diagnostic.Severity == SeverityError {
+					errorCount++
+				}
+			}
+			if errorCount != 1 {
+				t.Fatalf("diagnostics = %#v, want one root error", result.Diagnostics)
+			}
+			if len(result.Recoveries) != 1 || result.Recoveries[0].Kind != RecoveryMissing {
+				t.Fatalf("recoveries = %#v, want one missing element", result.Recoveries)
+			}
+		})
+	}
+}
+
 func TestRepresentativePrefixesStayLosslessAndMakeProgress(t *testing.T) {
 	statements := []string{
 		"SELECT customer_id, SUM(total) FROM orders WHERE paid = TRUE GROUP BY customer_id ORDER BY customer_id",

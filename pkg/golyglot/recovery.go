@@ -23,8 +23,9 @@ type RecoveryElement struct {
 	DiagnosticCode string
 }
 
-type recoveryState struct {
-	elements []RecoveryElement
+type parserSidecar struct {
+	recoveries []RecoveryElement
+	context    *contextCollector
 }
 
 func recoveryKind(action RecoveryAction) RecoveryKind {
