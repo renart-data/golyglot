@@ -56,7 +56,9 @@ func Parse(sql string, options ParseOptions) (ParseResult, error) {
 	}
 	result.Statements = p.parseStatements()
 	result.Diagnostics = append(result.Diagnostics, p.diagnostics...)
-	result.Recoveries = p.recoveries
+	if p.recovery != nil {
+		result.Recoveries = p.recovery.elements
+	}
 	if len(result.Statements) == 1 && (hasCommentToken(tokens) || parserTokensOwned) {
 		if rawNode, ok := result.Statements[0].Node.(interface{ setRaw(string) }); ok {
 			rawNode.setRaw(sql)

@@ -60,6 +60,84 @@ func TestUnterminatedCommentDiagnosticIsOwnedByLexer(t *testing.T) {
 	}
 }
 
+func TestTolerantIncompleteDMLKeepsTypedStatements(t *testing.T) {
+	tests := []struct {
+		sql  string
+		kind NodeKind
+	}{
+		{sql: "INSERT", kind: NodeInsertStatement},
+		{sql: "INSERT INTO", kind: NodeInsertStatement},
+		{sql: "INSERT INTO events", kind: NodeInsertStatement},
+		{sql: "INSERT INTO events (", kind: NodeInsertStatement},
+		{sql: "UPDATE", kind: NodeUpdateStatement},
+		{sql: "UPDATE accounts", kind: NodeUpdateStatement},
+		{sql: "UPDATE accounts SET", kind: NodeUpdateStatement},
+		{sql: "DELETE FROM", kind: NodeDeleteStatement},
+	}
+	for _, test := range tests {
+		t.Run(test.sql, func(t *testing.T) {
+			result := ParseTolerant(test.sql, DialectGeneric)
+			if len(result.Statements) != 1 {
+				t.Fatalf("got %d statements, want one", len(result.Statements))
+			}
+			if got := result.Statements[0].Node.Kind(); got != test.kind {
+				t.Fatalf("statement kind = %v (%T), want %v", got, result.Statements[0].Node, test.kind)
+			}
+			if !result.HasErrors() || len(result.Recoveries) == 0 {
+				t.Fatalf("incomplete statement has no recovery detail: %#v", result)
+			}
+			if result.OriginalSQL() != test.sql {
+				t.Fatalf("OriginalSQL() = %q, want %q", result.OriginalSQL(), test.sql)
+			}
+		})
+	}
+}
+
+func TestTolerantCreateTableReportsUnclosedBody(t *testing.T) {
+	const sql = "CREATE TABLE events (id BIGINT"
+	result := ParseTolerant(sql, DialectGeneric)
+	diagnostic := requireDiagnosticCode(t, result.Diagnostics, "PARSE_UNCLOSED_PAREN")
+	if len(diagnostic.Expected) != 1 || diagnostic.Expected[0] != (ExpectedSyntax{Kind: ExpectedToken, Text: ")"}) {
+		t.Fatalf("expectations = %#v, want closing parenthesis", diagnostic.Expected)
+	}
+	if result.Statements[0].Node.Kind() != NodeCreateTable {
+		t.Fatalf("statement = %T, want *CreateTableStmt", result.Statements[0].Node)
+	}
+}
+
+func TestStatementSynchronizationIgnoresNestedStarters(t *testing.T) {
+	const sql = "SELECT 1 alias (SELECT 2) SELECT 3"
+	result := ParseTolerant(sql, DialectGeneric)
+	if len(result.Statements) != 2 {
+		t.Fatalf("got %d statements, want recovery to resume at the top-level SELECT: %#v", len(result.Statements), result.Statements)
+	}
+	if result.Statements[1].Node.Kind() != NodeSelectStatement {
+		t.Fatalf("second statement = %T, want *SelectStmt", result.Statements[1].Node)
+	}
+	foundSkippedGroup := false
+	for _, recovery := range result.Recoveries {
+		if recovery.Kind != RecoverySkipped {
+			continue
+		}
+		text, ok := result.SourceSlice(recovery.Span)
+		if ok && text == "(SELECT 2)" {
+			foundSkippedGroup = true
+		}
+	}
+	if !foundSkippedGroup {
+		t.Fatalf("recoveries = %#v, want nested SELECT skipped as one group", result.Recoveries)
+	}
+}
+
+func TestTrailingQualifiedNameRecordsMissingIdentifier(t *testing.T) {
+	const sql = "SELECT account."
+	result := ParseTolerant(sql, DialectGeneric)
+	diagnostic := requireDiagnosticCode(t, result.Diagnostics, "PARSE_EXPECTED_IDENTIFIER")
+	if diagnostic.Span != (Span{Start: len(sql), End: len(sql)}) {
+		t.Fatalf("diagnostic span = %#v, want EOF insertion", diagnostic.Span)
+	}
+}
+
 func TestRepresentativePrefixesStayLosslessAndMakeProgress(t *testing.T) {
 	statements := []string{
 		"SELECT customer_id, SUM(total) FROM orders WHERE paid = TRUE GROUP BY customer_id ORDER BY customer_id",

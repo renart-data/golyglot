@@ -17,7 +17,7 @@ type parser struct {
 	nodeCount   int
 	options     ParseOptions
 	diagnostics []Diagnostic
-	recoveries  []RecoveryElement
+	recovery    *recoveryState
 }
 
 func (p *parser) parseStatements() []Statement {
@@ -33,6 +33,7 @@ func (p *parser) parseStatements() []Statement {
 		}
 
 		start := tok.Span.Start
+		statementPos := p.pos
 		var node Node
 		if p.options.Dialect == DialectDuckDB && ((tok.IsWord("WITH") && p.hasTopLevelDuckDBKeyword("PIVOT")) || (tok.Text == "(" && p.hasTopLevelDuckDBSetOperator())) {
 			node = p.parseRawStatement()
@@ -50,9 +51,9 @@ func (p *parser) parseStatements() []Statement {
 			node = p.parseCreateTable()
 		} else if tok.IsWord("CREATE") || (tok.IsWord("WITH") && p.startsWithWithNonQuery()) || p.isStatementKeyword(tok) {
 			switch {
-			case tok.IsWord("INSERT") && p.startsSimpleInsert():
+			case tok.IsWord("INSERT") && p.startsRecoverableInsert():
 				node = p.parseInsert()
-			case tok.IsWord("UPDATE") && p.startsSimpleUpdate():
+			case tok.IsWord("UPDATE") && p.startsRecoverableUpdate():
 				node = p.parseUpdate()
 			case tok.IsWord("DELETE") && p.options.Dialect == DialectTSQL && !p.peekWordAfter("DELETE", "FROM"):
 				node = p.parseRawStatement()
@@ -83,6 +84,18 @@ func (p *parser) parseStatements() []Statement {
 			node = p.parseExpressionStatement()
 		} else {
 			node = p.parseUnknownStatement()
+		}
+		if p.options.Mode == Tolerant && p.pos == statementPos && p.peek().Kind != TokenEOF {
+			stalled := p.peek()
+			p.report(Diagnostic{
+				Severity: SeverityError,
+				Code:     "PARSE_RECOVERY_STALLED",
+				Message:  fmt.Sprintf("parser made no progress at %s; skipped it to continue", stalled.Description()),
+				Span:     stalled.Span,
+				Found:    stalled.Kind,
+				Recovery: RecoveryDeleted,
+			})
+			p.advance()
 		}
 
 		end := p.lastEnd
@@ -342,6 +355,74 @@ func (p *parser) startsSimpleInsert() bool {
 	return index < len(p.tokens) && (p.tokens[index].IsWord("VALUES") || p.tokens[index].IsWord("SELECT") || p.tokens[index].IsWord("WITH"))
 }
 
+func (p *parser) startsRecoverableInsert() bool {
+	if p.startsSimpleInsert() {
+		return true
+	}
+	if p.options.Mode != Tolerant {
+		return false
+	}
+	index := nextSignificantToken(p.tokens, p.pos+1)
+	if tokenIndexAtEOF(p.tokens, index) {
+		return true
+	}
+	if index >= len(p.tokens) || !p.tokens[index].IsWord("INTO") {
+		return false
+	}
+	index = nextSignificantToken(p.tokens, index+1)
+	if tokenIndexAtEOF(p.tokens, index) {
+		return true
+	}
+	if index >= len(p.tokens) || !p.isNameToken(p.tokens[index]) {
+		return false
+	}
+	for {
+		index = nextSignificantToken(p.tokens, index+1)
+		if tokenIndexAtEOF(p.tokens, index) {
+			return true
+		}
+		if index >= len(p.tokens) || p.tokens[index].Text != "." {
+			break
+		}
+		index = nextSignificantToken(p.tokens, index+1)
+		if tokenIndexAtEOF(p.tokens, index) {
+			return true
+		}
+		if index >= len(p.tokens) || !p.isNameToken(p.tokens[index]) {
+			return false
+		}
+	}
+	if index < len(p.tokens) && p.tokens[index].Text == "(" {
+		inner := nextSignificantToken(p.tokens, index+1)
+		if tokenIndexAtEOF(p.tokens, inner) {
+			return true
+		}
+		if inner < len(p.tokens) && (p.tokens[inner].IsWord("SELECT") || p.tokens[inner].IsWord("WITH")) {
+			return false
+		}
+		depth := 0
+		for index < len(p.tokens) {
+			token := p.tokens[index]
+			if token.Kind == TokenEOF {
+				return depth > 0
+			}
+			if token.Kind != TokenComment {
+				if token.Text == "(" {
+					depth++
+				} else if token.Text == ")" {
+					depth--
+					if depth == 0 {
+						index = nextSignificantToken(p.tokens, index+1)
+						break
+					}
+				}
+			}
+			index++
+		}
+	}
+	return tokenIndexAtEOF(p.tokens, index)
+}
+
 func (p *parser) startsSimpleUpdate() bool {
 	index := p.pos
 	if index >= len(p.tokens) || !p.tokens[index].IsWord("UPDATE") {
@@ -362,6 +443,43 @@ func (p *parser) startsSimpleUpdate() bool {
 		}
 	}
 	return index < len(p.tokens) && p.tokens[index].IsWord("SET")
+}
+
+func (p *parser) startsRecoverableUpdate() bool {
+	if p.startsSimpleUpdate() {
+		return true
+	}
+	if p.options.Mode != Tolerant {
+		return false
+	}
+	index := nextSignificantToken(p.tokens, p.pos+1)
+	if tokenIndexAtEOF(p.tokens, index) {
+		return true
+	}
+	if index >= len(p.tokens) || !p.isNameToken(p.tokens[index]) {
+		return false
+	}
+	for {
+		index = nextSignificantToken(p.tokens, index+1)
+		if tokenIndexAtEOF(p.tokens, index) {
+			return true
+		}
+		if index >= len(p.tokens) || p.tokens[index].Text != "." {
+			break
+		}
+		index = nextSignificantToken(p.tokens, index+1)
+		if tokenIndexAtEOF(p.tokens, index) {
+			return true
+		}
+		if index >= len(p.tokens) || !p.isNameToken(p.tokens[index]) {
+			return false
+		}
+	}
+	return false
+}
+
+func tokenIndexAtEOF(tokens []Token, index int) bool {
+	return index >= len(tokens) || tokens[index].Kind == TokenEOF
 }
 
 func nextSignificantToken(tokens []Token, index int) int {
@@ -428,10 +546,46 @@ func (p *parser) parseCreateTable() Node {
 	var tail string
 	if p.peek().Kind != TokenEOF && p.peek().Text != ";" {
 		tailStart := p.peek().Span.Start
+		parentheses := 0
+		brackets := 0
+		braces := 0
 		for p.peek().Kind != TokenEOF && p.peek().Text != ";" {
-			end = p.advance().Span.End
+			token := p.advance()
+			end = token.Span.End
+			if p.options.Mode == Tolerant {
+				switch token.Text {
+				case "(":
+					parentheses++
+				case ")":
+					if parentheses > 0 {
+						parentheses--
+					}
+				case "[":
+					brackets++
+				case "]":
+					if brackets > 0 {
+						brackets--
+					}
+				case "{":
+					braces++
+				case "}":
+					if braces > 0 {
+						braces--
+					}
+				}
+			}
 		}
 		tail = p.text[tailStart:end]
+		if p.options.Mode == Tolerant {
+			switch {
+			case parentheses > 0:
+				p.reportUnclosedDelimiter("PARSE_UNCLOSED_PAREN", "CREATE TABLE body", ")")
+			case brackets > 0:
+				p.reportUnclosedDelimiter("PARSE_UNCLOSED_BRACKET", "CREATE TABLE body", "]")
+			case braces > 0:
+				p.reportUnclosedDelimiter("PARSE_UNCLOSED_BRACE", "CREATE TABLE body", "}")
+			}
+		}
 	}
 	return &CreateTableStmt{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Materialized: materialized, Temporary: temporary, IfNotExists: ifNotExists, Name: name, Tail: tail}
 }
@@ -468,6 +622,20 @@ func (p *parser) parseInsert() Node {
 		}
 	} else if p.isQueryStart() {
 		stmt.Query = p.parseSelect()
+	} else if p.options.Mode == Tolerant && (p.peek().Kind == TokenEOF || p.peek().Text == ";") {
+		p.report(Diagnostic{
+			Severity: SeverityError,
+			Code:     "PARSE_EXPECTED_INSERT_SOURCE",
+			Message:  fmt.Sprintf("expected VALUES or a query after INSERT target; got %s", p.peek().Description()),
+			Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+			Expected: []ExpectedSyntax{
+				{Kind: ExpectedKeyword, Text: "VALUES"},
+				{Kind: ExpectedKeyword, Text: "SELECT"},
+				{Kind: ExpectedKeyword, Text: "WITH"},
+			},
+			Found:    p.peek().Kind,
+			Recovery: RecoveryInserted,
+		})
 	}
 	p.captureStatementTail(&stmt.nodeBase, &stmt.Tail)
 	return stmt
@@ -5688,18 +5856,55 @@ func (p *parser) missingExpr(context string) Expr {
 }
 
 func (p *parser) synchronizeStatement() {
-	p.synchronizeTo(";", "SELECT", "WITH")
-}
-
-func (p *parser) synchronizeTo(words ...string) {
+	start := p.peek().Span.Start
+	end := start
+	depth := 0
 	for p.peek().Kind != TokenEOF {
-		for _, word := range words {
-			if p.peek().Text == word || p.peek().IsWord(word) {
-				return
+		token := p.peek()
+		if depth == 0 && (token.Text == ";" || p.isRecoveryStatementStart(token)) {
+			break
+		}
+		switch token.Text {
+		case "(", "[", "{":
+			depth++
+		case ")", "]", "}":
+			if depth > 0 {
+				depth--
 			}
 		}
-		p.advance()
+		end = p.advance().Span.End
 	}
+	if end <= start {
+		return
+	}
+	if p.recovery != nil && len(p.recovery.elements) > 0 {
+		recovery := &p.recovery.elements[len(p.recovery.elements)-1]
+		if recovery.Kind == RecoverySkipped && recovery.Span.Start == start {
+			recovery.Span.End = end
+			return
+		}
+	}
+	p.appendRecovery(RecoveryElement{
+		Kind:           RecoverySkipped,
+		Span:           Span{Start: start, End: end},
+		DiagnosticCode: "PARSE_UNEXPECTED_TOKEN",
+	})
+}
+
+func (p *parser) isRecoveryStatementStart(token Token) bool {
+	return token.IsWord("SELECT") || token.IsWord("WITH") || token.IsWord("VALUES") || token.IsWord("SET") || token.IsWord("USE") || p.isStatementKeyword(token)
+}
+
+func (p *parser) reportUnclosedDelimiter(code, context, delimiter string) {
+	p.report(Diagnostic{
+		Severity: SeverityError,
+		Code:     code,
+		Message:  fmt.Sprintf("unclosed %s; expected %s", context, delimiter),
+		Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+		Expected: []ExpectedSyntax{{Kind: ExpectedToken, Text: delimiter}},
+		Found:    p.peek().Kind,
+		Recovery: RecoveryInserted,
+	})
 }
 
 func (p *parser) enter() bool {
@@ -5746,22 +5951,26 @@ func (p *parser) report(diagnostic Diagnostic) {
 	if len(diagnostic.Expected) == 0 {
 		diagnostic.Expected = defaultExpectedSyntax(diagnostic.Code)
 	}
-	if p.options.Mode == Tolerant && diagnostic.Recovery == RecoveryInserted && len(p.diagnostics) > 0 {
+	if p.options.Mode == Tolerant && len(p.diagnostics) > 0 {
 		last := &p.diagnostics[len(p.diagnostics)-1]
-		if last.Recovery == RecoveryInserted && last.Span == diagnostic.Span && last.Found == diagnostic.Found {
+		if diagnostic.Recovery == RecoveryInserted && last.Recovery == RecoveryInserted && last.Span == diagnostic.Span && last.Found == diagnostic.Found {
 			last.Expected = mergeExpectedSyntax(last.Expected, diagnostic.Expected)
-			if len(p.recoveries) > 0 {
-				recovery := &p.recoveries[len(p.recoveries)-1]
+			if p.recovery != nil && len(p.recovery.elements) > 0 {
+				recovery := &p.recovery.elements[len(p.recovery.elements)-1]
 				if recovery.Kind == RecoveryMissing && recovery.Span == diagnostic.Span {
 					recovery.Expected = mergeExpectedSyntax(recovery.Expected, diagnostic.Expected)
 				}
 			}
 			return
 		}
+		if diagnostic.Recovery == RecoverySynchronized && last.Recovery == RecoverySynchronized && last.Span == diagnostic.Span {
+			last.Expected = mergeExpectedSyntax(last.Expected, diagnostic.Expected)
+			return
+		}
 	}
 	p.diagnostics = append(p.diagnostics, diagnostic)
 	if kind := recoveryKind(diagnostic.Recovery); kind != 0 {
-		p.recoveries = append(p.recoveries, RecoveryElement{
+		p.appendRecovery(RecoveryElement{
 			Kind:           kind,
 			Span:           diagnostic.Span,
 			Expected:       append([]ExpectedSyntax(nil), diagnostic.Expected...),
@@ -5769,6 +5978,13 @@ func (p *parser) report(diagnostic Diagnostic) {
 			DiagnosticCode: diagnostic.Code,
 		})
 	}
+}
+
+func (p *parser) appendRecovery(element RecoveryElement) {
+	if p.recovery == nil {
+		p.recovery = &recoveryState{}
+	}
+	p.recovery.elements = append(p.recovery.elements, element)
 }
 
 func maxInt(a, b int) int {

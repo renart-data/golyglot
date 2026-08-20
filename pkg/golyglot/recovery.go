@@ -23,6 +23,10 @@ type RecoveryElement struct {
 	DiagnosticCode string
 }
 
+type recoveryState struct {
+	elements []RecoveryElement
+}
+
 func recoveryKind(action RecoveryAction) RecoveryKind {
 	switch action {
 	case RecoveryInserted:
