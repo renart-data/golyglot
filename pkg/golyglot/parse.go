@@ -10,6 +10,7 @@ type ParseResult struct {
 	Tokens      []Token
 	Statements  []Statement
 	Diagnostics []Diagnostic
+	Recoveries  []RecoveryElement
 }
 
 func (r ParseResult) HasErrors() bool { return hasErrorDiagnostics(r.Diagnostics) }
@@ -41,15 +42,22 @@ func Parse(sql string, options ParseOptions) (ParseResult, error) {
 	tokens, lexicalDiagnostics := lexSQL(sql, options)
 	result.Tokens = tokens
 	result.Diagnostics = append(result.Diagnostics, lexicalDiagnostics...)
+	parserTokens := tokens
+	parserTokensOwned := false
+	if len(lexicalDiagnostics) > 0 {
+		parserTokens, parserTokensOwned = parserTokenView(tokens, lexicalDiagnostics)
+	}
 
 	p := parser{
-		text:    sql,
-		tokens:  tokens,
-		options: options,
+		text:        sql,
+		tokens:      parserTokens,
+		tokensOwned: parserTokensOwned,
+		options:     options,
 	}
 	result.Statements = p.parseStatements()
 	result.Diagnostics = append(result.Diagnostics, p.diagnostics...)
-	if len(result.Statements) == 1 && hasCommentToken(tokens) {
+	result.Recoveries = p.recoveries
+	if len(result.Statements) == 1 && (hasCommentToken(tokens) || parserTokensOwned) {
 		if rawNode, ok := result.Statements[0].Node.(interface{ setRaw(string) }); ok {
 			rawNode.setRaw(sql)
 		}
@@ -61,6 +69,26 @@ func Parse(sql string, options ParseOptions) (ParseResult, error) {
 		}
 	}
 	return result, nil
+}
+
+func parserTokenView(tokens []Token, diagnostics []Diagnostic) ([]Token, bool) {
+	unterminatedComment := false
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == "LEX_UNTERMINATED_COMMENT" {
+			unterminatedComment = true
+			break
+		}
+	}
+	if !unterminatedComment {
+		return tokens, false
+	}
+	view := append([]Token(nil), tokens...)
+	for index := range view {
+		if view[index].Kind == TokenUnterminatedComment {
+			view[index].Kind = TokenComment
+		}
+	}
+	return view, true
 }
 
 func hasCommentToken(tokens []Token) bool {

@@ -17,6 +17,7 @@ type parser struct {
 	nodeCount   int
 	options     ParseOptions
 	diagnostics []Diagnostic
+	recoveries  []RecoveryElement
 }
 
 func (p *parser) parseStatements() []Statement {
@@ -716,7 +717,11 @@ func (p *parser) parseSelect() *SelectStmt {
 		if p.matchWord("UNLOGGED") {
 			stmt.IntoUnlogged = true
 		}
-		stmt.Into, _ = p.parseNameParts()
+		var ok bool
+		stmt.Into, ok = p.parseNameParts()
+		if !ok {
+			p.reportExpectedIdentifier("after SELECT INTO")
+		}
 	}
 	if p.matchWord("FROM") {
 		stmt.From = p.parseFromClause()
@@ -2016,6 +2021,7 @@ func (p *parser) parseFromItem() FromItem {
 
 	parts, ok := p.parseFromNameParts()
 	if !ok {
+		p.reportExpectedTable("in FROM clause")
 		return nil
 	}
 	if p.options.Dialect == DialectDuckDB && p.matchText(":") {
@@ -2312,7 +2318,6 @@ func (p *parser) parseFromNameParts() ([]Identifier, bool) {
 	}
 	first, ok := p.parseIdentifier(true)
 	if !ok {
-		p.reportExpectedIdentifier("in name")
 		return nil, false
 	}
 	parts := []Identifier{first}
@@ -3917,7 +3922,9 @@ func (p *parser) parsePrefix() Expr {
 		}
 		if len(parts) == 1 && strings.EqualFold(parts[0].Text, "NEXT") && p.matchWord("VALUE") {
 			p.expectWord("FOR", "after NEXT VALUE")
-			p.parseNameParts()
+			if _, ok := p.parseNameParts(); !ok {
+				p.reportExpectedIdentifier("after NEXT VALUE FOR")
+			}
 			if p.matchWord("OVER") {
 				p.parseWindowSpecPtr()
 			}
@@ -4992,7 +4999,6 @@ func (p *parser) validateFunctionArguments(function *FunctionCallExpr) {
 func (p *parser) parseNameParts() ([]Identifier, bool) {
 	first, ok := p.parseIdentifier(true)
 	if !ok {
-		p.reportExpectedIdentifier("in name")
 		return nil, false
 	}
 	parts := []Identifier{first}
@@ -5013,6 +5019,10 @@ func (p *parser) parseNameParts() ([]Identifier, bool) {
 				p.advance()
 				parts = append(parts, Identifier{Text: "", Span: p.tokens[p.pos-1].Span})
 				continue
+			}
+			if next < len(p.tokens) && p.tokens[next].Kind == TokenEOF {
+				p.advance()
+				p.reportExpectedIdentifier("after . in name")
 			}
 			break
 		}
@@ -5595,6 +5605,7 @@ func (p *parser) expectText(text, context string) bool {
 		Code:     "PARSE_EXPECTED_TOKEN",
 		Message:  fmt.Sprintf("expected %s %s", text, context),
 		Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+		Expected: []ExpectedSyntax{{Kind: ExpectedToken, Text: text}},
 		Found:    p.peek().Kind,
 		Recovery: RecoveryInserted,
 	})
@@ -5615,6 +5626,7 @@ func (p *parser) reportExpectedWord(word, context string) {
 		Code:     "PARSE_EXPECTED_KEYWORD",
 		Message:  fmt.Sprintf("expected %s %s; got %s", word, context, p.peek().Description()),
 		Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+		Expected: []ExpectedSyntax{{Kind: ExpectedKeyword, Text: word}},
 		Found:    p.peek().Kind,
 		Recovery: RecoveryInserted,
 	})
@@ -5626,6 +5638,7 @@ func (p *parser) reportExpectedIdentifier(context string) {
 		Code:     "PARSE_EXPECTED_IDENTIFIER",
 		Message:  fmt.Sprintf("expected an identifier %s; got %s", context, p.peek().Description()),
 		Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+		Expected: []ExpectedSyntax{{Kind: ExpectedIdentifier}},
 		Found:    p.peek().Kind,
 		Recovery: RecoveryInserted,
 	})
@@ -5637,6 +5650,7 @@ func (p *parser) reportExpectedQuery(context string) {
 		Code:     "PARSE_EXPECTED_QUERY",
 		Message:  fmt.Sprintf("expected a query %s; got %s", context, p.peek().Description()),
 		Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+		Expected: []ExpectedSyntax{{Kind: ExpectedQuery}},
 		Found:    p.peek().Kind,
 		Recovery: RecoveryInserted,
 	})
@@ -5648,6 +5662,7 @@ func (p *parser) reportExpectedTable(context string) {
 		Code:     "PARSE_EXPECTED_TABLE",
 		Message:  fmt.Sprintf("expected a table expression %s; got %s", context, p.peek().Description()),
 		Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+		Expected: []ExpectedSyntax{{Kind: ExpectedTable}},
 		Found:    p.peek().Kind,
 		Recovery: RecoveryInserted,
 	})
@@ -5659,6 +5674,7 @@ func (p *parser) reportExpectedExpression(context string) {
 		Code:     "PARSE_EXPECTED_EXPRESSION",
 		Message:  fmt.Sprintf("expected an expression %s; got %s", context, p.peek().Description()),
 		Span:     Span{Start: p.peek().Span.Start, End: p.peek().Span.Start},
+		Expected: []ExpectedSyntax{{Kind: ExpectedExpression}},
 		Found:    p.peek().Kind,
 		Recovery: RecoveryInserted,
 	})
@@ -5727,7 +5743,32 @@ func (p *parser) report(diagnostic Diagnostic) {
 	if len(p.diagnostics) >= maxDiagnostics {
 		return
 	}
+	if len(diagnostic.Expected) == 0 {
+		diagnostic.Expected = defaultExpectedSyntax(diagnostic.Code)
+	}
+	if p.options.Mode == Tolerant && diagnostic.Recovery == RecoveryInserted && len(p.diagnostics) > 0 {
+		last := &p.diagnostics[len(p.diagnostics)-1]
+		if last.Recovery == RecoveryInserted && last.Span == diagnostic.Span && last.Found == diagnostic.Found {
+			last.Expected = mergeExpectedSyntax(last.Expected, diagnostic.Expected)
+			if len(p.recoveries) > 0 {
+				recovery := &p.recoveries[len(p.recoveries)-1]
+				if recovery.Kind == RecoveryMissing && recovery.Span == diagnostic.Span {
+					recovery.Expected = mergeExpectedSyntax(recovery.Expected, diagnostic.Expected)
+				}
+			}
+			return
+		}
+	}
 	p.diagnostics = append(p.diagnostics, diagnostic)
+	if kind := recoveryKind(diagnostic.Recovery); kind != 0 {
+		p.recoveries = append(p.recoveries, RecoveryElement{
+			Kind:           kind,
+			Span:           diagnostic.Span,
+			Expected:       append([]ExpectedSyntax(nil), diagnostic.Expected...),
+			Found:          p.peek(),
+			DiagnosticCode: diagnostic.Code,
+		})
+	}
 }
 
 func maxInt(a, b int) int {

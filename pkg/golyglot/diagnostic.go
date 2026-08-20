@@ -20,6 +20,29 @@ const (
 	RecoverySynchronized
 )
 
+// ExpectedSyntaxKind describes the grammar category that would allow parsing
+// to continue at a diagnostic or recovery location. Exact spellings are kept
+// in ExpectedSyntax.Text for keywords and punctuation.
+type ExpectedSyntaxKind uint8
+
+const (
+	ExpectedKeyword ExpectedSyntaxKind = iota + 1
+	ExpectedToken
+	ExpectedIdentifier
+	ExpectedExpression
+	ExpectedQuery
+	ExpectedTable
+	ExpectedStatement
+)
+
+// ExpectedSyntax is a parser expectation suitable for diagnostics,
+// completions, and editor recovery. Text is populated for exact keywords and
+// punctuation and is empty for grammar categories such as expressions.
+type ExpectedSyntax struct {
+	Kind ExpectedSyntaxKind
+	Text string
+}
+
 // Diagnostic is intentionally close to the useful subset of an LSP
 // Diagnostic, while retaining the canonical byte Span used by the parser.
 type Diagnostic struct {
@@ -27,7 +50,7 @@ type Diagnostic struct {
 	Code     string
 	Message  string
 	Span     Span
-	Expected []TokenKind
+	Expected []ExpectedSyntax
 	Found    TokenKind
 	Recovery RecoveryAction
 }
