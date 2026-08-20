@@ -73,6 +73,21 @@ func TestSyntacticContextAtIncompleteSQL(t *testing.T) {
 			replace:  Span{Start: 20, End: 20},
 		},
 		{
+			name:     "keyword-shaped table prefix",
+			sql:      "SELECT * FROM order",
+			kind:     ContextFrom,
+			expected: ExpectedSyntax{Kind: ExpectedTable},
+			prefix:   "order",
+			replace:  Span{Start: 14, End: 19},
+		},
+		{
+			name:     "complete order keyword",
+			sql:      "SELECT * FROM users ORDER",
+			kind:     ContextOrderBy,
+			expected: ExpectedSyntax{Kind: ExpectedKeyword, Text: "BY"},
+			replace:  Span{Start: 25, End: 25},
+		},
+		{
 			name:     "where expression",
 			sql:      "SELECT * FROM users WHERE ",
 			kind:     ContextWhere,
@@ -115,6 +130,14 @@ func TestSyntacticContextAtIncompleteSQL(t *testing.T) {
 			kind:     ContextExpression,
 			expected: ExpectedSyntax{Kind: ExpectedExpression},
 			replace:  Span{Start: 6, End: 6},
+		},
+		{
+			name:     "keyword-shaped expression prefix",
+			sql:      "SELECT CURRENT_DATE - IN",
+			kind:     ContextExpression,
+			expected: ExpectedSyntax{Kind: ExpectedExpression},
+			prefix:   "IN",
+			replace:  Span{Start: 22, End: 24},
 		},
 		{
 			name:     "create object prefix",

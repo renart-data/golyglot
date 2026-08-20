@@ -26,8 +26,10 @@ type RecoveryElement struct {
 }
 
 type parserSidecar struct {
-	recoveries []RecoveryElement
-	context    *contextCollector
+	recoveries          []RecoveryElement
+	context             *contextCollector
+	suppressInsertion   bool
+	suppressInsertionAt int
 }
 
 func recoveryKind(action RecoveryAction) RecoveryKind {

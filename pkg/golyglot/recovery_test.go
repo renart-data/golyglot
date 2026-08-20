@@ -207,6 +207,38 @@ func TestNestedIncompleteConstructsKeepOneRootDiagnostic(t *testing.T) {
 	}
 }
 
+func TestPartialExpectedKeywordOwnsFollowingCascade(t *testing.T) {
+	const sql = "SELECT CASE WHEN score > 90 T"
+	result := ParseTolerant(sql, DialectGeneric)
+	if len(result.Diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want one partial-keyword error", result.Diagnostics)
+	}
+	diagnostic := result.Diagnostics[0]
+	if diagnostic.Code != "PARSE_EXPECTED_KEYWORD" ||
+		!containsExpectedSyntax(diagnostic.Expected, ExpectedSyntax{Kind: ExpectedKeyword, Text: "THEN"}) {
+		t.Fatalf("diagnostic = %#v, want expected THEN", diagnostic)
+	}
+	if len(result.Recoveries) != 1 || result.Recoveries[0].Kind != RecoveryUnexpected {
+		t.Fatalf("recoveries = %#v, want the partial T token retained as unexpected", result.Recoveries)
+	}
+}
+
+func TestPartialQueryStarterOwnsCTECascade(t *testing.T) {
+	const sql = "WITH recent AS (SEL"
+	result := ParseTolerant(sql, DialectGeneric)
+	if len(result.Diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want one partial-query error", result.Diagnostics)
+	}
+	diagnostic := result.Diagnostics[0]
+	if diagnostic.Code != "PARSE_EXPECTED_QUERY" ||
+		!containsExpectedSyntax(diagnostic.Expected, ExpectedSyntax{Kind: ExpectedKeyword, Text: "SELECT"}) {
+		t.Fatalf("diagnostic = %#v, want expected SELECT query", diagnostic)
+	}
+	if len(result.Recoveries) != 1 || result.Recoveries[0].Kind != RecoveryUnexpected {
+		t.Fatalf("recoveries = %#v, want the partial SEL token retained as unexpected", result.Recoveries)
+	}
+}
+
 func TestRepresentativePrefixesStayLosslessAndMakeProgress(t *testing.T) {
 	statements := []string{
 		"SELECT customer_id, SUM(total) FROM orders WHERE paid = TRUE GROUP BY customer_id ORDER BY customer_id",

@@ -5829,6 +5829,9 @@ func (p *parser) expectWord(word, context string) bool {
 }
 
 func (p *parser) reportExpectedWord(word, context string) {
+	if p.consumePartialExpectedWord(word, context) {
+		return
+	}
 	p.report(Diagnostic{
 		Severity: SeverityError,
 		Code:     "PARSE_EXPECTED_KEYWORD",
@@ -5838,6 +5841,31 @@ func (p *parser) reportExpectedWord(word, context string) {
 		Found:    p.peek().Kind,
 		Recovery: RecoveryInserted,
 	})
+}
+
+func (p *parser) consumePartialExpectedWord(word, context string) bool {
+	if p.options.Mode != Tolerant || strings.IndexByte(word, ' ') >= 0 {
+		return false
+	}
+	token := p.peek()
+	if !p.isNameToken(token) || len(token.Text) == 0 || len(token.Text) >= len(word) || !strings.HasPrefix(strings.ToUpper(word), strings.ToUpper(token.Text)) {
+		return false
+	}
+	if !tokenIndexAtEOF(p.tokens, nextSignificantToken(p.tokens, p.pos+1)) {
+		return false
+	}
+	p.advance()
+	p.report(Diagnostic{
+		Severity: SeverityError,
+		Code:     "PARSE_EXPECTED_KEYWORD",
+		Message:  fmt.Sprintf("expected %s %s; got %s", word, context, token.Description()),
+		Span:     token.Span,
+		Expected: []ExpectedSyntax{{Kind: ExpectedKeyword, Text: word}},
+		Found:    token.Kind,
+		Recovery: RecoveryDeleted,
+	})
+	p.suppressInsertionsAt(token.Span.End)
+	return true
 }
 
 func (p *parser) reportExpectedIdentifier(context string) {
@@ -5853,6 +5881,9 @@ func (p *parser) reportExpectedIdentifier(context string) {
 }
 
 func (p *parser) reportExpectedQuery(context string) {
+	if p.consumePartialExpectedQuery(context) {
+		return
+	}
 	p.report(Diagnostic{
 		Severity: SeverityError,
 		Code:     "PARSE_EXPECTED_QUERY",
@@ -5862,6 +5893,37 @@ func (p *parser) reportExpectedQuery(context string) {
 		Found:    p.peek().Kind,
 		Recovery: RecoveryInserted,
 	})
+}
+
+func (p *parser) consumePartialExpectedQuery(context string) bool {
+	if p.options.Mode != Tolerant {
+		return false
+	}
+	token := p.peek()
+	if !p.isNameToken(token) || len(token.Text) == 0 || !tokenIndexAtEOF(p.tokens, nextSignificantToken(p.tokens, p.pos+1)) {
+		return false
+	}
+	var expected []ExpectedSyntax
+	for _, word := range []string{"SELECT", "WITH", "VALUES"} {
+		if len(token.Text) < len(word) && strings.HasPrefix(word, strings.ToUpper(token.Text)) {
+			expected = append(expected, ExpectedSyntax{Kind: ExpectedKeyword, Text: word})
+		}
+	}
+	if len(expected) == 0 {
+		return false
+	}
+	p.advance()
+	p.report(Diagnostic{
+		Severity: SeverityError,
+		Code:     "PARSE_EXPECTED_QUERY",
+		Message:  fmt.Sprintf("expected a query %s; got %s", context, token.Description()),
+		Span:     token.Span,
+		Expected: expected,
+		Found:    token.Kind,
+		Recovery: RecoveryDeleted,
+	})
+	p.suppressInsertionsAt(token.Span.End)
+	return true
 }
 
 func (p *parser) reportExpectedTable(context string) {
@@ -5991,6 +6053,9 @@ func (p *parser) report(diagnostic Diagnostic) {
 	if len(diagnostic.Expected) == 0 {
 		diagnostic.Expected = defaultExpectedSyntax(diagnostic.Code)
 	}
+	if p.options.Mode == Tolerant && diagnostic.Recovery == RecoveryInserted && p.sidecar != nil && p.sidecar.suppressInsertion && diagnostic.Span.Start == p.sidecar.suppressInsertionAt {
+		return
+	}
 	if p.options.Mode == Tolerant && len(p.diagnostics) > 0 {
 		last := &p.diagnostics[len(p.diagnostics)-1]
 		if diagnostic.Recovery == RecoveryInserted && last.Recovery == RecoveryInserted && last.Span == diagnostic.Span && last.Found == diagnostic.Found {
@@ -6017,6 +6082,14 @@ func (p *parser) appendRecovery(element RecoveryElement) {
 		p.sidecar = &parserSidecar{}
 	}
 	p.sidecar.recoveries = append(p.sidecar.recoveries, element)
+}
+
+func (p *parser) suppressInsertionsAt(position int) {
+	if p.sidecar == nil {
+		p.sidecar = &parserSidecar{}
+	}
+	p.sidecar.suppressInsertion = true
+	p.sidecar.suppressInsertionAt = position
 }
 
 func maxInt(a, b int) int {

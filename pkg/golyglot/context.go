@@ -156,14 +156,27 @@ func SyntacticContextAt(sql string, cursor int, dialect Dialect) (SyntacticConte
 	}
 
 	tokens, _ := lexSQL(sql, options)
-	view, replace, prefix := contextTokenView(sql, cursor, tokens)
+	view, replace, prefix, keywordCandidate, hasKeywordCandidate := contextTokenView(sql, cursor, tokens)
 	context.Replace = replace
 	context.Prefix = prefix
 
+	collector, diagnostics := collectSyntacticContext(sql[:cursor], view, options)
+	if hasKeywordCandidate && contextKeywordWasRejected(keywordCandidate, diagnostics) {
+		view = contextWithoutToken(view, keywordCandidate)
+		context.Replace = keywordCandidate.Span
+		context.Prefix = keywordCandidate.Text
+		collector, _ = collectSyntacticContext(sql[:cursor], view, options)
+	}
+	context.Kind = collector.kind
+	context.Expected = append([]ExpectedSyntax(nil), collector.expected...)
+	return context, nil
+}
+
+func collectSyntacticContext(text string, tokens []Token, options ParseOptions) (*contextCollector, []Diagnostic) {
 	collector := &contextCollector{}
 	p := parser{
-		text:        sql[:cursor],
-		tokens:      view,
+		text:        text,
+		tokens:      tokens,
 		tokensOwned: true,
 		options:     options,
 		sidecar:     &parserSidecar{context: collector},
@@ -173,7 +186,7 @@ func SyntacticContextAt(sql string, cursor int, dialect Dialect) (SyntacticConte
 		collector.record(ContextStatement, 1)
 	}
 	for _, diagnostic := range p.diagnostics {
-		if diagnostic.Span.Start != cursor || len(diagnostic.Expected) == 0 {
+		if diagnostic.Span.Start != len(text) || len(diagnostic.Expected) == 0 {
 			continue
 		}
 		kind, priority := contextKindForDiagnostic(diagnostic)
@@ -182,12 +195,10 @@ func SyntacticContextAt(sql string, cursor int, dialect Dialect) (SyntacticConte
 	if len(collector.expected) == 0 {
 		collector.record(ContextDocument, 1, statementExpectations()...)
 	}
-	context.Kind = collector.kind
-	context.Expected = append([]ExpectedSyntax(nil), collector.expected...)
-	return context, nil
+	return collector, p.diagnostics
 }
 
-func contextTokenView(sql string, cursor int, tokens []Token) ([]Token, Span, string) {
+func contextTokenView(sql string, cursor int, tokens []Token) ([]Token, Span, string, Token, bool) {
 	replace := Span{Start: cursor, End: cursor}
 	prefix := ""
 	view := make([]Token, 0, len(tokens))
@@ -207,13 +218,41 @@ func contextTokenView(sql string, cursor int, tokens []Token) ([]Token, Span, st
 			prefix = token.Text
 			break
 		}
+		if token.Span.End == cursor && cursor == len(sql) && token.Kind == TokenKeyword {
+			view = append(view, token)
+			view = append(view, Token{Kind: TokenEOF, Span: Span{Start: cursor, End: cursor}})
+			return view, replace, prefix, token, true
+		}
 		if token.Kind == TokenUnterminatedComment {
 			token.Kind = TokenComment
 		}
 		view = append(view, token)
 	}
 	view = append(view, Token{Kind: TokenEOF, Span: Span{Start: cursor, End: cursor}})
-	return view, replace, prefix
+	return view, replace, prefix, Token{}, false
+}
+
+func contextKeywordWasRejected(token Token, diagnostics []Diagnostic) bool {
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Severity != SeverityError {
+			continue
+		}
+		if diagnostic.Span.Start == token.Span.Start && diagnostic.Span.End <= token.Span.End {
+			return true
+		}
+	}
+	return false
+}
+
+func contextWithoutToken(tokens []Token, remove Token) []Token {
+	view := make([]Token, 0, len(tokens)-1)
+	for _, token := range tokens {
+		if token.Kind != TokenEOF && token.Kind == remove.Kind && token.Span == remove.Span {
+			continue
+		}
+		view = append(view, token)
+	}
+	return view
 }
 
 func isCursorPrefixToken(token Token) bool {
@@ -256,6 +295,19 @@ func contextKindForDiagnostic(diagnostic Diagnostic) (SyntacticContextKind, int)
 			return ContextCTE, 90
 		}
 		return ContextStatement, 80
+	case "PARSE_EXPECTED_KEYWORD":
+		switch {
+		case strings.Contains(message, "ORDER"):
+			return ContextOrderBy, 90
+		case strings.Contains(message, "GROUP"):
+			return ContextGroupBy, 90
+		case strings.Contains(message, "CTE") || strings.Contains(message, "WITH"):
+			return ContextCTE, 90
+		case strings.Contains(message, "JOIN"):
+			return ContextJoin, 90
+		default:
+			return ContextExpression, 80
+		}
 	case "PARSE_EXPECTED_IDENTIFIER":
 		switch {
 		case strings.Contains(message, "UPDATE"):
