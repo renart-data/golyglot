@@ -165,3 +165,14 @@ func TestStrictDiagnosticUsesByteSpanForUnicode(t *testing.T) {
 		t.Fatalf("diagnostic source = %q, want emoji", got)
 	}
 }
+
+func TestStrictDiagnosticPreservesPolyglotOperatorTokenName(t *testing.T) {
+	result, err := ParseStrict("SELECT 1 >", DialectGeneric)
+	var syntaxError *SyntaxError
+	if !errors.As(err, &syntaxError) {
+		t.Fatalf("ParseStrict error = %T %v, want *SyntaxError", err, err)
+	}
+	if got, want := syntaxError.Polyglot.Message, "Unexpected token: Gt"; got != want {
+		t.Fatalf("Polyglot diagnostic message = %q, want %q; diagnostics: %#v", got, want, result.Diagnostics)
+	}
+}

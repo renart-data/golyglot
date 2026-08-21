@@ -193,6 +193,9 @@ func tokenAtSpan(tokens []Token, span Span) (Token, bool) {
 }
 
 func polyglotTokenName(token Token) string {
+	// Keep strict diagnostics compatible with Polyglot's public TokenType
+	// names. Golyglot intentionally represents punctuation and operators with
+	// fewer lexer kinds, so the source spelling has to provide the distinction.
 	switch token.Text {
 	case "(":
 		return "LParen"
@@ -212,6 +215,134 @@ func polyglotTokenName(token Token) string {
 		return "Semicolon"
 	case ":":
 		return "Colon"
+	case ".":
+		return "Dot"
+	case "-":
+		return "Dash"
+	case "+":
+		return "Plus"
+	case "::":
+		return "DColon"
+	case ".:":
+		return "DotColon"
+	case "::$":
+		return "DColonDollar"
+	case "::%":
+		return "DColonPercent"
+	case "::?":
+		return "DColonQMark"
+	case "??":
+		return "DQMark"
+	case "?::":
+		return "QDColon"
+	case "*":
+		return "Star"
+	case `\`:
+		return "Backslash"
+	case "/":
+		return "Slash"
+	case "%":
+		return "Percent"
+	case "<":
+		return "Lt"
+	case "<=":
+		return "Lte"
+	case ">":
+		return "Gt"
+	case ">=":
+		return "Gte"
+	case "!":
+		return "Exclamation"
+	case "=", "==":
+		return "Eq"
+	case "!=", "<>", "^=":
+		return "Neq"
+	case "<=>":
+		return "NullsafeEq"
+	case ":=":
+		return "ColonEq"
+	case ":>":
+		return "ColonGt"
+	case "!:>":
+		return "NColonGt"
+	case "&":
+		return "Amp"
+	case "||":
+		return "DPipe"
+	case "|>":
+		return "PipeGt"
+	case "|":
+		return "Pipe"
+	case "|/":
+		return "PipeSlash"
+	case "||/":
+		return "DPipeSlash"
+	case "^":
+		return "Caret"
+	case "^@":
+		return "CaretAt"
+	case "<<":
+		return "LtLt"
+	case ">>":
+		return "GtGt"
+	case "~":
+		return "Tilde"
+	case "~~~":
+		return "Glob"
+	case "~~":
+		return "Like"
+	case "!~~":
+		return "NotLike"
+	case "~~*":
+		return "ILike"
+	case "!~~*":
+		return "NotILike"
+	case "~*":
+		return "IRLike"
+	case "!~":
+		return "NotRLike"
+	case "!~*":
+		return "NotIRLike"
+	case "->":
+		return "Arrow"
+	case "->>":
+		return "DArrow"
+	case "=>":
+		return "FArrow"
+	case "#":
+		return "Hash"
+	case "#>":
+		return "HashArrow"
+	case "#>>":
+		return "DHashArrow"
+	case "<->":
+		return "LrArrow"
+	case "@":
+		return "DAt"
+	case "@@":
+		return "AtAt"
+	case "@?":
+		return "AtQMark"
+	case "<@":
+		return "LtAt"
+	case "@>":
+		return "AtGt"
+	case "$":
+		return "Dollar"
+	case "&&":
+		return "DAmp"
+	case "&<":
+		return "AmpLt"
+	case "&>":
+		return "AmpGt"
+	case "**":
+		return "DStar"
+	case "?&":
+		return "QMarkAmp"
+	case "?|":
+		return "QMarkPipe"
+	case "#-":
+		return "HashDash"
 	}
 	if token.Kind == TokenEOF {
 		return "Eof"
