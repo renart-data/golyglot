@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.4 - 2026-08-21
+
 - Schema-aware output inference across CTEs, subqueries, stars, set
   operations, joins, table functions, casts, expressions, and common SQL
   functions, including normalized types and nullability.
