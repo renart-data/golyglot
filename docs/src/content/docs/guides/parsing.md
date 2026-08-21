@@ -11,7 +11,36 @@ for _, diagnostic := range result.Diagnostics {
 	// diagnostic.Span is a half-open byte range in sql.
 	fmt.Println(diagnostic.Code, diagnostic.Message, diagnostic.Span)
 }
+
+for _, recovery := range result.Recoveries {
+	// Missing syntax has a zero-width span. Skipped syntax still points into sql.
+	fmt.Println(recovery.Kind, recovery.Expected, recovery.Span)
+}
 ```
+
+Diagnostics and recovery elements expose structured `ExpectedSyntax` values,
+so editor integrations do not need to extract keywords or grammar categories
+from human-readable messages. In tolerant mode, incomplete `INSERT`, `UPDATE`,
+and `DELETE` inputs retain their typed statement nodes rather than falling back
+to a separate editor grammar.
+
+For completion, ask the same parser for the grammar around a byte cursor:
+
+```go
+context, err := golyglot.SyntacticContextAt(sql, cursor, golyglot.DialectPostgreSQL)
+if err != nil {
+	panic(err)
+}
+fmt.Println(context.Kind, context.Expected)
+
+// Replace covers the whole token intersecting the cursor while Prefix is the
+// portion already typed. They can be passed directly to a completion filter.
+fmt.Println(context.Replace, context.Prefix)
+```
+
+`SyntacticContextAt` uses the production lexer, statement dispatch, and Pratt
+expression parser. It makes only the token intersecting the cursor virtual;
+there is no second parser or duplicated SQL grammar.
 
 The parsed document is byte-for-byte lossless even though whitespace is not
 materialized as tokens. `OriginalSQL` returns the untouched input,

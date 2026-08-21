@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.3 - 2026-08-21
+
+- Structured recovery sidecar metadata for missing, unexpected, and skipped
+  syntax, including expected syntax, source spans, found tokens, and owning
+  diagnostic codes.
+- Typed tolerant-parser recovery for incomplete queries, DML, DDL, commands,
+  expressions, names, and delimiters without noisy insertion cascades.
+- Cursor-aware `SyntacticContextAt` results with parser-derived context,
+  expected syntax, partial-token prefixes, and exact replacement spans for
+  editor and language-server integrations.
+- More precise handling of partial query, statement, and clause keywords,
+  backed by parser regression tests, fuzz coverage, and updated parsing docs.
+
 ## 0.1.0-alpha.2 - 2026-08-19
 
 - Byte-for-byte lossless parse results with zero-copy source slices, implicit
