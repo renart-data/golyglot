@@ -42,7 +42,8 @@ Supported features:
 - Fluent builders for expressions, queries, joins, CTEs, set operations, and common DML
 - Syntax, semantic, and schema-aware validation
 - Column lineage, source-table discovery, and OpenLineage payloads
-- Compact query facts for projections, relations, CTEs, and set operations
+- Compact query facts and schema-aware output type/nullability inference
+- Structured standalone SQL data-type parsing and normalization
 - AST walking, transformation, search, and column-reference utilities
 
 Alpha release. Run `make release-check`; use `make fixtures` to refresh the

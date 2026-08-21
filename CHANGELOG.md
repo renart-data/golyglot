@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Schema-aware output inference across CTEs, subqueries, stars, set
+  operations, joins, table functions, casts, expressions, and common SQL
+  functions, including normalized types and nullability.
+- Structured standalone SQL data-type parsing with aliases, modifiers, nested
+  arrays/lists/maps/structs, and stable canonical rendering.
+- Arithmetic type diagnostics and DuckDB-aware numeric, range, and temporal
+  inference for editor and type-checking integrations.
+
 ## 0.1.0-alpha.3 - 2026-08-21
 
 - Structured recovery sidecar metadata for missing, unexpected, and skipped

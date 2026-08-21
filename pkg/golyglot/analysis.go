@@ -16,14 +16,25 @@ type AnalyzeQueryOptions struct {
 // projections, relations, CTEs, and set operations without exposing a second
 // analysis-specific tree.
 type QueryAnalysis struct {
-	Shape           string               `json:"shape"`
-	CTEs            []string             `json:"ctes"`
-	CTEFacts        []CTEFact            `json:"cteFacts"`
-	Projections     []ProjectionFact     `json:"projections"`
-	Relations       []RelationFact       `json:"relations"`
-	BaseTables      []RelationFact       `json:"baseTables"`
-	StarProjections []StarProjectionFact `json:"starProjections"`
-	SetOperations   []SetOperationFact   `json:"setOperations"`
+	Shape               string                  `json:"shape"`
+	CTEs                []string                `json:"ctes"`
+	CTEFacts            []CTEFact               `json:"cteFacts"`
+	Projections         []ProjectionFact        `json:"projections"`
+	Relations           []RelationFact          `json:"relations"`
+	BaseTables          []RelationFact          `json:"baseTables"`
+	StarProjections     []StarProjectionFact    `json:"starProjections"`
+	SetOperations       []SetOperationFact      `json:"setOperations"`
+	OutputColumns       []QueryOutputColumnFact `json:"outputColumns"`
+	OutputNamesComplete bool                    `json:"outputNamesComplete"`
+	OutputTypesComplete bool                    `json:"outputTypesComplete"`
+}
+
+// QueryOutputColumnFact is the schema fact inferred for one concrete output
+// column after wildcard expansion and CTE/subquery resolution.
+type QueryOutputColumnFact struct {
+	Name        string  `json:"name"`
+	TypeHint    *string `json:"typeHint,omitempty"`
+	Nullability string  `json:"nullability"`
 }
 
 type ProjectionFact struct {
@@ -125,6 +136,7 @@ func Analyze(sql string, dialect Dialect) (QueryAnalysis, error) {
 
 func analyzeSelectFacts(selectStmt *SelectStmt, options AnalyzeQueryOptions) QueryAnalysis {
 	result := QueryAnalysis{Shape: queryShape(selectStmt)}
+	semantics := analyzeSelectSemantics(selectStmt, options, nil)
 	for _, cte := range selectStmt.With {
 		result.CTEs = append(result.CTEs, cte.Name.Text)
 		fact := CTEFact{Name: cte.Name.Text}
@@ -139,6 +151,17 @@ func analyzeSelectFacts(selectStmt *SelectStmt, options AnalyzeQueryOptions) Que
 	}
 
 	result.Projections = projectionFacts(selectStmt, options.Schema)
+	for index := range result.Projections {
+		if index >= len(semantics.projections) {
+			break
+		}
+		inferred := semantics.projections[index]
+		if inferred.dataType.Known() {
+			value := inferred.dataType.SQL()
+			result.Projections[index].TypeHint = &value
+		}
+		result.Projections[index].Nullability = inferred.nullability
+	}
 	result.Relations = relationFacts(selectStmt, options.Schema)
 	for _, relation := range result.Relations {
 		if relation.Kind == "table" {
@@ -150,14 +173,20 @@ func analyzeSelectFacts(selectStmt *SelectStmt, options AnalyzeQueryOptions) Que
 			continue
 		}
 		star := StarProjectionFact{Index: projection.Index, Table: projection.StarTable}
-		if projection.StarTable != nil {
-			star.ExpandedColumns = schemaColumnsForRelation(result.Relations, *projection.StarTable)
-		} else {
-			for _, relation := range result.Relations {
-				star.ExpandedColumns = append(star.ExpandedColumns, relation.Columns...)
-			}
+		for _, column := range semantics.stars[projection.Index] {
+			star.ExpandedColumns = append(star.ExpandedColumns, column.name)
 		}
 		result.StarProjections = append(result.StarProjections, star)
+	}
+	result.OutputNamesComplete = semantics.namesComplete
+	result.OutputTypesComplete = semantics.typesComplete
+	for _, column := range semantics.output {
+		fact := QueryOutputColumnFact{Name: column.name, Nullability: column.nullability}
+		if column.dataType.Known() {
+			value := column.dataType.SQL()
+			fact.TypeHint = &value
+		}
+		result.OutputColumns = append(result.OutputColumns, fact)
 	}
 	collectSetFacts(selectStmt, &result)
 	return result

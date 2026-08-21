@@ -117,7 +117,7 @@ func ValidateWithOptions(sql string, options ValidationOptions) ValidationResult
 	}
 	parsed, parseErr := Parse(sql, ParseOptions{Dialect: options.Dialect, Mode: mode})
 	if parseErr != nil && len(parsed.Diagnostics) == 0 {
-		collector := validationCollector{source: parsed.Source, result: &result}
+		collector := validationCollector{source: parsed.Source, result: &result, dialect: options.Dialect}
 		collector.add(SeverityError, "VALIDATION_PARSE_FAILED", parseErr.Error(), Span{})
 	}
 	for _, diagnostic := range parsed.Diagnostics {
@@ -148,7 +148,7 @@ func ValidateWithOptions(sql string, options ValidationOptions) ValidationResult
 		}
 	}
 	if options.Semantic {
-		collector := validationCollector{source: parsed.Source, result: &result, schema: options.Schema}
+		collector := validationCollector{source: parsed.Source, result: &result, schema: options.Schema, dialect: options.Dialect, issueKeys: make(map[string]bool)}
 		for _, statement := range parsed.Statements {
 			collector.statement(statement.Node)
 		}
@@ -230,12 +230,21 @@ func polyglotStrictSyntaxBoundary(token Token) (string, bool) {
 }
 
 type validationCollector struct {
-	source SourceText
-	result *ValidationResult
-	schema *ValidationSchema
+	source    SourceText
+	result    *ValidationResult
+	schema    *ValidationSchema
+	dialect   Dialect
+	issueKeys map[string]bool
 }
 
 func (c *validationCollector) add(severity Severity, code, message string, span Span) {
+	key := fmt.Sprintf("%s\x00%d\x00%d\x00%s", code, span.Start, span.End, message)
+	if c.issueKeys != nil && c.issueKeys[key] {
+		return
+	}
+	if c.issueKeys != nil {
+		c.issueKeys[key] = true
+	}
 	c.result.Diagnostics = append(c.result.Diagnostics, Diagnostic{
 		Severity: severity,
 		Code:     code,
@@ -343,6 +352,10 @@ func (c *validationCollector) selectStatement(selectStmt *SelectStmt) {
 	if c.schema != nil {
 		c.validateSchemaRelations(relations)
 		c.validateSchemaColumns(selectStmt, relations)
+	}
+	semantics := analyzeSelectSemantics(selectStmt, AnalyzeQueryOptions{Dialect: c.dialect, Schema: c.schema}, nil)
+	for _, issue := range semantics.issues {
+		c.add(SeverityError, issue.code, issue.message, issue.span)
 	}
 	if selectStmt.SetLeft != nil {
 		c.selectStatement(selectStmt.SetLeft)
