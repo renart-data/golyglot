@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.5 - 2026-08-26
+
+- Accept standalone `VALUES`, `VALUES` set operations, and `VALUES`-backed
+  CTEs as complete query bodies during semantic validation, avoiding false
+  `SEMANTIC_EMPTY_PROJECTION` diagnostics in editor integrations.
+
 ## 0.1.0-alpha.4 - 2026-08-21
 
 - Schema-aware output inference across CTEs, subqueries, stars, set
