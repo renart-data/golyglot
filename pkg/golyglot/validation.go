@@ -310,7 +310,10 @@ func (c *validationCollector) selectStatement(selectStmt *SelectStmt) {
 		c.add(SeverityError, "SEMANTIC_MISSING_QUERY", "query is missing a SELECT body", Span{})
 		return
 	}
-	if len(selectStmt.Projections) == 0 {
+	hasQueryBody := len(selectStmt.Projections) > 0 ||
+		len(selectStmt.ValuesRows) > 0 ||
+		(selectStmt.SetLeft != nil && selectStmt.SetRight != nil)
+	if !hasQueryBody {
 		c.add(SeverityError, "SEMANTIC_EMPTY_PROJECTION", "SELECT requires at least one projection", selectStmt.SourceSpan())
 	}
 	cteNames := make(map[string]bool)
