@@ -143,6 +143,7 @@ func lineageFor(sql string, dialect Dialect, column string, ordinal int, schema 
 	if err != nil {
 		return LineageNode{}, err
 	}
+	normalizeDuckDBStructFieldReferences(query, AnalyzeQueryOptions{Dialect: dialect, Schema: schema})
 	output, err := outputColumnsForQuery(query, schema)
 	if err != nil {
 		return LineageNode{}, err
@@ -291,6 +292,13 @@ func lineageChildren(expression Expr, query *SelectStmt, sourceSQL string, schem
 }
 
 func lineageReferenceChildren(column string, relation RelationFact, query *SelectStmt, sourceSQL string, schema *ValidationSchema) []LineageNode {
+	if relation.Kind == "table_function" {
+		var result []LineageNode
+		for _, source := range tableFunctionSourceExpressions(query, relation) {
+			result = append(result, lineageChildren(source, query, sourceSQL, schema)...)
+		}
+		return result
+	}
 	if relation.Kind != "derived" && relation.Kind != "cte" {
 		return nil
 	}

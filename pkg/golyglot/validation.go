@@ -310,6 +310,9 @@ func (c *validationCollector) selectStatement(selectStmt *SelectStmt) {
 		c.add(SeverityError, "SEMANTIC_MISSING_QUERY", "query is missing a SELECT body", Span{})
 		return
 	}
+	if c.schema != nil {
+		normalizeDuckDBStructFieldReferences(selectStmt, AnalyzeQueryOptions{Dialect: c.dialect, Schema: c.schema})
+	}
 	hasQueryBody := len(selectStmt.Projections) > 0 ||
 		len(selectStmt.ValuesRows) > 0 ||
 		(selectStmt.SetLeft != nil && selectStmt.SetRight != nil)
@@ -431,7 +434,15 @@ func collectValidationRelations(selectStmt *SelectStmt) []validationRelation {
 			if value.Alias != nil {
 				name = value.Alias.Text
 			}
-			result = append(result, validationRelation{lookupName: name, displayName: name, alias: optionalIdentifierText(value.Alias), kind: "virtual", span: value.SourceSpan()})
+			columns := make(map[string]SchemaColumn)
+			for _, column := range value.Columns {
+				columns[strings.ToLower(column.Text)] = SchemaColumn{Name: column.Text}
+			}
+			if len(columns) == 0 && len(value.Name) > 0 {
+				column := strings.ToLower(value.Name[len(value.Name)-1].Text)
+				columns[column] = SchemaColumn{Name: column}
+			}
+			result = append(result, validationRelation{lookupName: name, displayName: name, alias: optionalIdentifierText(value.Alias), kind: "virtual", columns: columns, span: value.SourceSpan()})
 		}
 	}
 	for i := range selectStmt.From {

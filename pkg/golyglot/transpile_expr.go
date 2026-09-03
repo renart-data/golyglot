@@ -2776,7 +2776,11 @@ func rewriteFunction(function *FunctionCallExpr, target Dialect) Expr {
 						if strings.EqualFold(words[0], "MIN") {
 							mapped = "ARG_MIN_NULL"
 						}
-						return &FunctionCallExpr{Name: []Identifier{{Text: mapped}}, Args: []Expr{function.Args[0], identifierExpr(words[1])}}
+						rewritten := *function
+						rewritten.Name = []Identifier{{Text: mapped}}
+						rewritten.Args = []Expr{function.Args[0], identifierExpr(words[1])}
+						rewritten.Having = nil
+						return &rewritten
 					}
 				}
 			}
@@ -2938,12 +2942,8 @@ func rewriteFunction(function *FunctionCallExpr, target Dialect) Expr {
 		case "LIST_CONCAT":
 			setFunctionName(function, "ARRAY_CAT")
 		case "QUANTILE_CONT", "QUANTILE_DISC":
-			if len(function.Args) == 2 {
-				percentile := "PERCENTILE_CONT"
-				if name == "QUANTILE_DISC" {
-					percentile = "PERCENTILE_DISC"
-				}
-				return &FunctionCallExpr{Name: []Identifier{{Text: percentile}}, Args: []Expr{function.Args[1]}, WithinGroup: []OrderItem{{Expr: function.Args[0]}}}
+			if rewritten := rewriteDuckDBQuantileOrderedSet(function, name); rewritten != nil {
+				return rewritten
 			}
 		case "REGEXP_EXTRACT":
 			setFunctionName(function, "REGEXP_SUBSTR")
@@ -3377,11 +3377,9 @@ func rewriteFunction(function *FunctionCallExpr, target Dialect) Expr {
 			return &BinaryExpr{Left: function.Args[0], Operator: "&&", Right: function.Args[1]}
 		}
 		if (name == "QUANTILE_CONT" || name == "QUANTILE_DISC") && len(function.Args) == 2 {
-			percentile := "PERCENTILE_CONT"
-			if name == "QUANTILE_DISC" {
-				percentile = "PERCENTILE_DISC"
+			if rewritten := rewriteDuckDBQuantileOrderedSet(function, name); rewritten != nil {
+				return rewritten
 			}
-			return &FunctionCallExpr{Name: []Identifier{{Text: percentile}}, Args: []Expr{function.Args[1]}, WithinGroup: []OrderItem{{Expr: function.Args[0]}}}
 		}
 		if name == "NOW" {
 			return identifierExpr("CURRENT_TIMESTAMP")
@@ -3533,6 +3531,49 @@ func rewriteFunction(function *FunctionCallExpr, target Dialect) Expr {
 		setFunctionName(function, "GROUP_CONCAT")
 	}
 	return nil
+}
+
+func rewriteDuckDBQuantileOrderedSet(function *FunctionCallExpr, name string) Expr {
+	if len(function.Args) != 2 || functionHasUnrepresentableOrderedSetModifiers(function) {
+		return nil
+	}
+	percentile := "PERCENTILE_CONT"
+	if strings.EqualFold(name, "QUANTILE_DISC") {
+		percentile = "PERCENTILE_DISC"
+	}
+	rewritten := *function
+	rewritten.Name = []Identifier{{Text: percentile}}
+	rewritten.Args = []Expr{function.Args[1]}
+	rewritten.WithinGroup = []OrderItem{{Expr: function.Args[0]}}
+	return &rewritten
+}
+
+func functionHasUnrepresentableOrderedSetModifiers(function *FunctionCallExpr) bool {
+	return function.Distinct ||
+		function.Star ||
+		function.Having != nil ||
+		len(function.OrderBy) > 0 ||
+		strings.TrimSpace(function.ArgumentTail) != "" ||
+		function.IgnoreNulls ||
+		function.RespectNulls ||
+		function.NullsInside ||
+		len(function.WithinGroup) > 0
+}
+
+func isPlainDuckDBListAggregate(function *FunctionCallExpr) bool {
+	return function != nil &&
+		len(function.Args) == 1 &&
+		!function.Distinct &&
+		!function.Star &&
+		function.Having == nil &&
+		len(function.OrderBy) == 0 &&
+		strings.TrimSpace(function.ArgumentTail) == "" &&
+		!function.IgnoreNulls &&
+		!function.RespectNulls &&
+		!function.NullsInside &&
+		len(function.WithinGroup) == 0 &&
+		function.Filter == nil &&
+		function.Over == nil
 }
 
 func conditionalFunctionName(target Dialect) string {

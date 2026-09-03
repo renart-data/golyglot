@@ -763,9 +763,6 @@ func normalizeDuckDBIdentityText(text, source string) string {
 	if strings.HasPrefix(strings.TrimSpace(upperSource), "SET VARIABLE ") {
 		text = replaceAllFold(text, "SET VARIABLE = ", "SET VARIABLE ")
 	}
-	if strings.Contains(upperSource, "SELECT LIST(") {
-		text = replaceAllFold(text, "SELECT LIST(", "SELECT ARRAY_AGG(")
-	}
 	if strings.Contains(upperSource, "BITSTRING") {
 		text = replaceAllFold(text, " AS BITSTRING)", " AS BIT)")
 	}

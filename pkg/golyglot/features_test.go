@@ -58,6 +58,57 @@ func TestDialectDiscoveryAndBuilder(t *testing.T) {
 	}
 }
 
+func TestBuilderPreservesNestedOperatorGrouping(t *testing.T) {
+	tests := []struct {
+		name string
+		expr Expression
+		want string
+	}{
+		{
+			name: "lower-precedence boolean on the left",
+			expr: Column("a").Eq(1).Or(Column("b").Eq(2)).And(Column("c").Eq(3)),
+			want: "(a = 1 OR b = 2) AND c = 3",
+		},
+		{
+			name: "lower-precedence boolean on the right",
+			expr: Column("a").Eq(1).And(Column("b").Eq(2).Or(Column("c").Eq(3))),
+			want: "a = 1 AND (b = 2 OR c = 3)",
+		},
+		{
+			name: "lower-precedence arithmetic on the left",
+			expr: Column("a").Add(Column("b")).Mul(Column("c")),
+			want: "(a + b) * c",
+		},
+		{
+			name: "lower-precedence arithmetic on the right",
+			expr: Column("a").Mul(Column("b").Add(Column("c"))),
+			want: "a * (b + c)",
+		},
+		{
+			name: "right-nested subtraction",
+			expr: Column("a").Sub(Column("b").Sub(Column("c"))),
+			want: "a - (b - c)",
+		},
+		{
+			name: "right-nested division",
+			expr: Column("a").Div(Column("b").Div(Column("c"))),
+			want: "a / (b / c)",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := BuildSQL(test.expr, DialectGeneric)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("BuildSQL() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestVisitorWalkFindAndTransform(t *testing.T) {
 	result, err := ParseStrict("SELECT a + b AS total FROM source", DialectGeneric)
 	if err != nil {

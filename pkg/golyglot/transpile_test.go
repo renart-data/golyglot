@@ -36,6 +36,98 @@ func TestTranspileFunctionRewrites(t *testing.T) {
 	}
 }
 
+func TestTranspilePreservesAggregateModifiers(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		from Dialect
+		to   Dialect
+		want string
+	}{
+		{
+			name: "DuckDB continuous quantile filter",
+			sql:  "SELECT QUANTILE_CONT(a, 0.5) FILTER (WHERE keep) FROM t",
+			from: DialectDuckDB,
+			to:   DialectPostgreSQL,
+			want: "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY a) FILTER(WHERE keep) FROM t",
+		},
+		{
+			name: "DuckDB discrete quantile filter",
+			sql:  "SELECT QUANTILE_DISC(a, 0.5) FILTER (WHERE keep) FROM t",
+			from: DialectDuckDB,
+			to:   DialectPostgreSQL,
+			want: "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY a) FILTER(WHERE keep) FROM t",
+		},
+		{
+			name: "DuckDB quantile unsafe distinct stays intact",
+			sql:  "SELECT QUANTILE_CONT(DISTINCT a, 0.5) FROM t",
+			from: DialectDuckDB,
+			to:   DialectPostgreSQL,
+			want: "SELECT QUANTILE_CONT(DISTINCT a, 0.5) FROM t",
+		},
+		{
+			name: "BigQuery arg max filter",
+			sql:  "SELECT ANY_VALUE(label HAVING MAX score) FILTER (WHERE keep) FROM t",
+			from: DialectBigQuery,
+			to:   DialectDuckDB,
+			want: "SELECT ARG_MAX_NULL(label, score) FILTER(WHERE keep) FROM t",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := TranspileOne(test.sql, test.from, test.to)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("TranspileOne() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestTranspileDuckDBQuantileAggregateLowerings(t *testing.T) {
+	tests := []struct {
+		sql  string
+		to   Dialect
+		want string
+	}{
+		{sql: "SELECT QUANTILE(a, 0.5) FROM t", to: DialectSpark, want: "SELECT PERCENTILE(a, 0.5) FROM t"},
+		{sql: "SELECT QUANTILE_CONT(a, 0.5) FROM t", to: DialectPostgreSQL, want: "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY a) FROM t"},
+		{sql: "SELECT QUANTILE_DISC(a, 0.5) FROM t", to: DialectPostgreSQL, want: "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY a) FROM t"},
+		{sql: "SELECT APPROX_QUANTILE(a, 0.5) FROM t", to: DialectSnowflake, want: "SELECT APPROX_PERCENTILE(a, 0.5) FROM t"},
+	}
+	for _, test := range tests {
+		got, err := TranspileOne(test.sql, DialectDuckDB, test.to)
+		if err != nil {
+			t.Fatalf("TranspileOne(%q): %v", test.sql, err)
+		}
+		if got != test.want {
+			t.Fatalf("TranspileOne(%q) = %q, want %q", test.sql, got, test.want)
+		}
+	}
+}
+
+func TestTranspileDuckDBListKeepsAggregateModifiers(t *testing.T) {
+	plain, err := TranspileOne("SELECT LIST(value) FROM t", DialectDuckDB, DialectDuckDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain != "SELECT ARRAY_AGG(value) FROM t" {
+		t.Fatalf("plain LIST = %q", plain)
+	}
+
+	modified, err := TranspileOne("SELECT LIST(DISTINCT value ORDER BY value DESC) FILTER (WHERE keep) FROM t", DialectDuckDB, DialectDuckDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "SELECT LIST(DISTINCT value ORDER BY value DESC) FILTER(WHERE keep) FROM t"
+	if modified != want {
+		t.Fatalf("modified LIST = %q, want %q", modified, want)
+	}
+}
+
 func TestTranspileTSQLPagination(t *testing.T) {
 	got, err := TranspileOne("SELECT a FROM t ORDER BY a LIMIT 10 OFFSET 5", DialectGeneric, DialectTSQL)
 	if err != nil {
