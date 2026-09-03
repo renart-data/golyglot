@@ -464,6 +464,10 @@ func outputNames(selectStmt *SelectStmt, schema *ValidationSchema) []string {
 }
 
 func analysisColumnReferences(expression Expr, relations []RelationFact, query *SelectStmt) []ColumnReferenceFact {
+	return analysisColumnReferencesWithStack(expression, relations, query, make(map[int]bool))
+}
+
+func analysisColumnReferencesWithStack(expression Expr, relations []RelationFact, query *SelectStmt, resolvingTableFunctions map[int]bool) []ColumnReferenceFact {
 	var result []ColumnReferenceFact
 	for _, reference := range Columns(expression) {
 		fact := ColumnReferenceFact{Column: reference.Column, Unqualified: reference.Table == "", Confidence: "low", SourceKind: "unknown"}
@@ -473,7 +477,7 @@ func analysisColumnReferences(expression Expr, relations []RelationFact, query *
 			fact.Table = &table
 			fact.Confidence = "high"
 		}
-		for _, relation := range relations {
+		for relationIndex, relation := range relations {
 			matches := strings.EqualFold(relation.Name, reference.Table) || (relation.Alias != nil && strings.EqualFold(*relation.Alias, reference.Table)) || (relation.Table != nil && strings.EqualFold(*relation.Table, reference.Table))
 			if reference.Table == "" && len(relations) == 1 {
 				matches = true
@@ -483,10 +487,19 @@ func analysisColumnReferences(expression Expr, relations []RelationFact, query *
 				continue
 			}
 			if relation.Kind == "table_function" {
+				// A table function's projected column may derive from one of its
+				// arguments (for example UNNEST(items)). Never resolve an argument
+				// back through the same table function: malformed or dialect-specific
+				// expressions must degrade to unknown lineage instead of recursing.
+				if resolvingTableFunctions[relationIndex] {
+					continue
+				}
+				resolvingTableFunctions[relationIndex] = true
 				var upstream []ColumnReferenceFact
 				for _, source := range tableFunctionSourceExpressions(query, relation) {
-					upstream = append(upstream, analysisColumnReferences(source, relations, query)...)
+					upstream = append(upstream, analysisColumnReferencesWithStack(source, relations, query, resolvingTableFunctions)...)
 				}
+				delete(resolvingTableFunctions, relationIndex)
 				if len(upstream) > 0 {
 					result = append(result, upstream...)
 					resolvedViaTableFunction = true

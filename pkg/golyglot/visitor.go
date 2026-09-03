@@ -549,6 +549,13 @@ type ColumnReference struct {
 func Columns(root Node) []ColumnReference {
 	var result []ColumnReference
 	Walk(root, func(node Node) VisitAction {
+		if interval, ok := node.(*IntervalExpr); ok {
+			// Interval qualifiers such as HOUR and DAY describe the literal's
+			// unit; they are not column references. The value may still be an
+			// expression (for example INTERVAL duration DAY), so inspect it.
+			result = append(result, Columns(interval.Value)...)
+			return SkipChildren
+		}
 		identifier, ok := node.(*IdentifierExpr)
 		if !ok || len(identifier.Parts) == 0 {
 			return VisitChildren
