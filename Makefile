@@ -6,7 +6,7 @@
 	fetch-polyglot-ffi fixtures fmt-check release-check \
 	select-benchmark-corpus test test-cgo-free test-polyglot \
 	test-polyglot-ffi-extended test-polyglot-full test-polyglot-identity \
-	test-polyglot-oracle test-race test-tools
+	test-polyglot-oracle test-race test-tools type-oracle-duckdb
 
 POLYGLOT_REF ?= d5aa0d493c281398c9fdbc6febd3577f10ceac2f
 POLYGLOT_CACHE ?= .cache/polyglot
@@ -76,6 +76,9 @@ test-polyglot-oracle: test-polyglot-ffi-extended
 
 test-polyglot-identity:
 	go test -run '^TestSQLGlotIdentityFixtures$$' -count=1 ./...
+
+type-oracle-duckdb:
+	go run ./cmd/golyglot-type-oracle --cases 24
 
 # Extract the complete upstream SQLGlot and Polyglot custom fixture snapshots
 # without adding SQLGlot, Rust, or any native library to the Go module. The
