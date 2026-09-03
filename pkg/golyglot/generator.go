@@ -2940,7 +2940,14 @@ func (g generator) expr(expression Expr, parentPrecedence int) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		right, err := g.expr(expression.Right, 0)
+		rightPrecedence := 0
+		if isGroupingAwareInfixOperator(expression.Operator) {
+			rightPrecedence = precedence
+			if binaryRightOperandNeedsEqualPrecedenceParentheses(expression.Operator, expression.Right) {
+				rightPrecedence++
+			}
+		}
+		right, err := g.expr(expression.Right, rightPrecedence)
 		if err != nil {
 			return "", err
 		}
@@ -3816,6 +3823,33 @@ func expressionPrecedence(expression Expr) int {
 	default:
 		return 8
 	}
+}
+
+func binaryRightOperandNeedsEqualPrecedenceParentheses(parentOperator string, right Expr) bool {
+	child, ok := right.(*BinaryExpr)
+	if !ok || expressionPrecedence(child) != expressionPrecedence(&BinaryExpr{Operator: parentOperator}) {
+		return false
+	}
+	parent := strings.ToUpper(strings.TrimSpace(parentOperator))
+	childOperator := strings.ToUpper(strings.TrimSpace(child.Operator))
+	if !isArithmeticInfixOperator(parent) || !isArithmeticInfixOperator(childOperator) {
+		return false
+	}
+	return !((parent == "+" && childOperator == "+") || (parent == "*" && childOperator == "*"))
+}
+
+func isArithmeticInfixOperator(operator string) bool {
+	switch operator {
+	case "+", "-", "*", "/", "%", "MOD":
+		return true
+	default:
+		return false
+	}
+}
+
+func isGroupingAwareInfixOperator(operator string) bool {
+	operator = strings.ToUpper(strings.TrimSpace(operator))
+	return operator == "OR" || operator == "XOR" || operator == "AND" || isArithmeticInfixOperator(operator)
 }
 
 func generateIdentifiers(identifiers []Identifier) string {

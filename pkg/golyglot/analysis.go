@@ -126,6 +126,7 @@ func AnalyzeQuery(sql string, options AnalyzeQueryOptions) (QueryAnalysis, error
 	if !ok {
 		return QueryAnalysis{}, fmt.Errorf("analyze query requires a SELECT statement, found %s", result.Statements[0].Node.Kind())
 	}
+	normalizeDuckDBStructFieldReferences(query, options)
 	return analyzeSelectFacts(query, options), nil
 }
 
@@ -150,7 +151,7 @@ func analyzeSelectFacts(selectStmt *SelectStmt, options AnalyzeQueryOptions) Que
 		result.CTEFacts = append(result.CTEFacts, fact)
 	}
 
-	result.Projections = projectionFacts(selectStmt, options.Schema)
+	result.Projections = projectionFacts(selectStmt, options.Schema, options.Dialect)
 	for index := range result.Projections {
 		if index >= len(semantics.projections) {
 			break
@@ -188,7 +189,7 @@ func analyzeSelectFacts(selectStmt *SelectStmt, options AnalyzeQueryOptions) Que
 		}
 		result.OutputColumns = append(result.OutputColumns, fact)
 	}
-	collectSetFacts(selectStmt, &result)
+	collectSetFacts(selectStmt, &result, options.Dialect)
 	return result
 }
 
@@ -205,7 +206,7 @@ func queryShape(selectStmt *SelectStmt) string {
 	return "select"
 }
 
-func projectionFacts(selectStmt *SelectStmt, schema *ValidationSchema) []ProjectionFact {
+func projectionFacts(selectStmt *SelectStmt, schema *ValidationSchema, dialect Dialect) []ProjectionFact {
 	result := make([]ProjectionFact, 0, len(selectStmt.Projections))
 	relations := relationFacts(selectStmt, schema)
 	for index, item := range selectStmt.Projections {
@@ -224,7 +225,7 @@ func projectionFacts(selectStmt *SelectStmt, schema *ValidationSchema) []Project
 		} else if name := expressionOutputName(expression); name != "" {
 			fact.Name = &name
 		}
-		fact.TransformKind = expressionTransformKind(expression)
+		fact.TransformKind = expressionTransformKind(expression, dialect)
 		if isStarExpression(expression) {
 			fact.IsStar = true
 			if qualifier := starQualifier(expression); qualifier != "" {
@@ -235,7 +236,7 @@ func projectionFacts(selectStmt *SelectStmt, schema *ValidationSchema) []Project
 			castType := builderExprSQL(cast.Type)
 			fact.CastType = &castType
 		}
-		fact.Upstream = analysisColumnReferences(expression, relations)
+		fact.Upstream = analysisColumnReferences(expression, relations, selectStmt)
 		if function, ok := unwrapAliasExpression(expression).(*FunctionCallExpr); ok {
 			functionFact := &TransformFunctionFact{Name: strings.ToUpper(identifiersText(function.Name))}
 			for _, argument := range function.Args {
@@ -243,7 +244,7 @@ func projectionFacts(selectStmt *SelectStmt, schema *ValidationSchema) []Project
 				case *LiteralExpr:
 					functionFact.LiteralArgs = append(functionFact.LiteralArgs, value.Raw)
 				default:
-					functionFact.ColumnArgs = append(functionFact.ColumnArgs, analysisColumnReferences(argument, relations)...)
+					functionFact.ColumnArgs = append(functionFact.ColumnArgs, analysisColumnReferences(argument, relations, selectStmt)...)
 				}
 			}
 			fact.TransformFunction = functionFact
@@ -270,14 +271,17 @@ func expressionOutputName(expression Expr) string {
 	return ""
 }
 
-func expressionTransformKind(expression Expr) string {
+func expressionTransformKind(expression Expr, dialect Dialect) string {
 	if isStarExpression(expression) {
 		return "star"
 	}
-	switch unwrapAliasExpression(expression).(type) {
+	switch value := unwrapAliasExpression(expression).(type) {
 	case *IdentifierExpr:
 		return "identity"
 	case *FunctionCallExpr:
+		if isAggregateFunctionName(identifiersText(value.Name), dialect) {
+			return "aggregation"
+		}
 		return "function"
 	case *CastExpr:
 		return "cast"
@@ -364,7 +368,14 @@ func relationFacts(selectStmt *SelectStmt, schema *ValidationSchema) []RelationF
 			if value.Alias != nil {
 				name = value.Alias.Text
 			}
-			result = append(result, relationFactFromName(name, "table_function", optionalIdentifierText(value.Alias)))
+			fact := relationFactFromName(name, "table_function", optionalIdentifierText(value.Alias))
+			for _, column := range value.Columns {
+				fact.Columns = append(fact.Columns, column.Text)
+			}
+			if len(fact.Columns) == 0 && len(value.Name) > 0 {
+				fact.Columns = append(fact.Columns, strings.ToLower(value.Name[len(value.Name)-1].Text))
+			}
+			result = append(result, fact)
 		case *RawFrom:
 			result = append(result, relationFactFromName(value.Raw, "raw", optionalIdentifierText(value.Alias)))
 		}
@@ -452,10 +463,11 @@ func outputNames(selectStmt *SelectStmt, schema *ValidationSchema) []string {
 	return result
 }
 
-func analysisColumnReferences(expression Expr, relations []RelationFact) []ColumnReferenceFact {
+func analysisColumnReferences(expression Expr, relations []RelationFact, query *SelectStmt) []ColumnReferenceFact {
 	var result []ColumnReferenceFact
 	for _, reference := range Columns(expression) {
 		fact := ColumnReferenceFact{Column: reference.Column, Unqualified: reference.Table == "", Confidence: "low", SourceKind: "unknown"}
+		resolvedViaTableFunction := false
 		if reference.Table != "" {
 			table := reference.Table
 			fact.Table = &table
@@ -470,6 +482,17 @@ func analysisColumnReferences(expression Expr, relations []RelationFact) []Colum
 			if !matches {
 				continue
 			}
+			if relation.Kind == "table_function" {
+				var upstream []ColumnReferenceFact
+				for _, source := range tableFunctionSourceExpressions(query, relation) {
+					upstream = append(upstream, analysisColumnReferences(source, relations, query)...)
+				}
+				if len(upstream) > 0 {
+					result = append(result, upstream...)
+					resolvedViaTableFunction = true
+					break
+				}
+			}
 			name := relation.Name
 			fact.SourceName = &name
 			fact.SourceKind = relation.Kind
@@ -479,12 +502,70 @@ func analysisColumnReferences(expression Expr, relations []RelationFact) []Colum
 			}
 			break
 		}
-		result = append(result, fact)
+		if !resolvedViaTableFunction {
+			result = append(result, fact)
+		}
 	}
 	return result
 }
 
-func collectSetFacts(selectStmt *SelectStmt, result *QueryAnalysis) {
+func tableFunctionSourceExpressions(query *SelectStmt, relation RelationFact) []Expr {
+	if query == nil {
+		return nil
+	}
+	var findItem func(FromItem) []Expr
+	findItem = func(item FromItem) []Expr {
+		switch value := item.(type) {
+		case *TableFunctionFrom:
+			name := identifiersText(value.Name)
+			if value.Alias != nil {
+				name = value.Alias.Text
+			}
+			if strings.EqualFold(name, relation.Name) || (relation.Alias != nil && value.Alias != nil && strings.EqualFold(value.Alias.Text, *relation.Alias)) {
+				return value.Args
+			}
+		case *GroupedFrom:
+			for index := range value.Items {
+				if sources := findTableExpressionFunctionSources(&value.Items[index], findItem); len(sources) > 0 {
+					return sources
+				}
+			}
+		case *SubqueryFrom:
+			if sources := tableFunctionSourceExpressions(value.Query, relation); len(sources) > 0 {
+				return sources
+			}
+		}
+		return nil
+	}
+	for index := range query.From {
+		if sources := findTableExpressionFunctionSources(&query.From[index], findItem); len(sources) > 0 {
+			return sources
+		}
+	}
+	for _, cte := range query.With {
+		if sources := tableFunctionSourceExpressions(cte.Query, relation); len(sources) > 0 {
+			return sources
+		}
+	}
+	return nil
+}
+
+func findTableExpressionFunctionSources(table *TableExpr, find func(FromItem) []Expr) []Expr {
+	if table == nil {
+		return nil
+	}
+	if sources := find(table.Primary); len(sources) > 0 {
+		return sources
+	}
+	for _, join := range table.Joins {
+		if sources := find(join.Right); len(sources) > 0 {
+			return sources
+		}
+	}
+	return nil
+}
+
+func collectSetFacts(selectStmt *SelectStmt, result *QueryAnalysis, dialect Dialect) {
 	if selectStmt == nil || selectStmt.SetRight == nil {
 		return
 	}
@@ -495,12 +576,12 @@ func collectSetFacts(selectStmt *SelectStmt, result *QueryAnalysis) {
 	}
 	fact.OutputColumns = outputNames(left, nil)
 	fact.Branches = append(fact.Branches,
-		SetOperationBranchFact{Index: 0, Role: SetOperationBranchRoleValue, Projections: projectionFacts(left, nil)},
-		SetOperationBranchFact{Index: 1, Role: SetOperationBranchRoleValue, Projections: projectionFacts(selectStmt.SetRight, nil)},
+		SetOperationBranchFact{Index: 0, Role: SetOperationBranchRoleValue, Projections: projectionFacts(left, nil, dialect)},
+		SetOperationBranchFact{Index: 1, Role: SetOperationBranchRoleValue, Projections: projectionFacts(selectStmt.SetRight, nil, dialect)},
 	)
 	result.SetOperations = append(result.SetOperations, fact)
 	if selectStmt.SetLeft != nil {
-		collectSetFacts(selectStmt.SetLeft, result)
+		collectSetFacts(selectStmt.SetLeft, result, dialect)
 	}
-	collectSetFacts(selectStmt.SetRight, result)
+	collectSetFacts(selectStmt.SetRight, result, dialect)
 }

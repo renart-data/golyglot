@@ -3159,6 +3159,10 @@ func normalizeDialectSourceNode(root Node, source, target Dialect) Node {
 			return current
 		}
 		name := strings.ToUpper(function.Name[0].Text)
+		if source == DialectDuckDB && target == DialectDuckDB && name == "LIST" && isPlainDuckDBListAggregate(function) {
+			setFunctionName(function, "ARRAY_AGG")
+			return function
+		}
 		if target == DialectDuckDB && function.RawArgs == "" {
 			if rewritten, handled := normalizeDuckDBSourceFunction(function, source); handled {
 				return rewritten

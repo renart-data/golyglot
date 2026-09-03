@@ -162,3 +162,161 @@ func TestValidateReportsLiteralArithmeticTypeMismatchWithoutSchema(t *testing.T)
 		t.Fatalf("validation result = %#v", result)
 	}
 }
+
+func TestValidateWithSchemaAcceptsDuckDBStructFieldAccess(t *testing.T) {
+	schema := duckDBStructFieldTestSchema()
+	queries := []string{
+		"SELECT composite_value.field_value AS output_value FROM source_table",
+		"SELECT source_table.composite_value.field_value AS output_value FROM source_table",
+		"SELECT item.field_value AS output_value FROM source_table s CROSS JOIN UNNEST(s.nested_items) AS expanded(item)",
+	}
+	for _, query := range queries {
+		result := ValidateWithSchema(query, schema, DialectDuckDB)
+		if !result.Valid {
+			t.Fatalf("validation failed for %q: %#v", query, result.Errors)
+		}
+	}
+
+	negative := ValidateWithSchema("SELECT missing.field_value FROM source_table", schema, DialectDuckDB)
+	if negative.Valid || !hasValidationCode(negative.Errors, "SCHEMA_UNKNOWN_COLUMN") {
+		t.Fatalf("unresolved struct root validation = %#v", negative)
+	}
+}
+
+func TestAnalyzeQueryResolvesDuckDBStructFieldsAndTypes(t *testing.T) {
+	schema := duckDBStructFieldTestSchema()
+	cases := []struct {
+		sql            string
+		physicalColumn string
+	}{
+		{
+			sql:            "SELECT composite_value.field_value AS output_value FROM source_table",
+			physicalColumn: "composite_value",
+		},
+		{
+			sql:            "SELECT source_table.composite_value.field_value AS output_value FROM source_table",
+			physicalColumn: "composite_value",
+		},
+		{
+			sql:            "SELECT item.field_value AS output_value FROM source_table s CROSS JOIN UNNEST(s.nested_items) AS expanded(item)",
+			physicalColumn: "nested_items",
+		},
+	}
+
+	for _, test := range cases {
+		analysis, err := AnalyzeQuery(test.sql, AnalyzeQueryOptions{Dialect: DialectDuckDB, Schema: &schema})
+		if err != nil {
+			t.Fatalf("AnalyzeQuery(%q): %v", test.sql, err)
+		}
+		if len(analysis.Projections) != 1 || analysis.Projections[0].TypeHint == nil || *analysis.Projections[0].TypeHint != "VARCHAR" {
+			t.Fatalf("projection type for %q = %#v, want VARCHAR", test.sql, analysis.Projections)
+		}
+		found := false
+		for _, reference := range analysis.Projections[0].Upstream {
+			if reference.SourceName != nil && *reference.SourceName == "source_table" && reference.Column == test.physicalColumn {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("upstream for %q = %#v, want source_table.%s", test.sql, analysis.Projections[0].Upstream, test.physicalColumn)
+		}
+	}
+}
+
+func TestLineageWithSchemaResolvesDuckDBStructFields(t *testing.T) {
+	schema := duckDBStructFieldTestSchema()
+	cases := []struct {
+		sql            string
+		physicalColumn string
+	}{
+		{
+			sql:            "SELECT composite_value.field_value AS output_value FROM source_table",
+			physicalColumn: "composite_value",
+		},
+		{
+			sql:            "SELECT item.field_value AS output_value FROM source_table s CROSS JOIN UNNEST(s.nested_items) AS expanded(item)",
+			physicalColumn: "nested_items",
+		},
+	}
+
+	for _, test := range cases {
+		node, err := LineageWithSchema("output_value", test.sql, schema, DialectDuckDB)
+		if err != nil {
+			t.Fatalf("LineageWithSchema(%q): %v", test.sql, err)
+		}
+		found := false
+		for _, descendant := range node.Walk() {
+			if descendant.SourceKind == "table" && descendant.SourceName == "source_table" && lastIdentifier(descendant.Name) == test.physicalColumn {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("lineage for %q = %#v, want physical source_table.%s", test.sql, node.Walk(), test.physicalColumn)
+		}
+	}
+}
+
+func TestAnalyzeQueryClassifiesDuckDBAggregateCatalog(t *testing.T) {
+	analysis, err := AnalyzeQuery(
+		"SELECT COUNT_IF(score > 0), MEDIAN(score), FIRST(score), ARG_MAX_NULL(label, score), ARG_MIN_NULL(label, score), BITSTRING_AGG(score), SUMKAHAN(score), KAHAN_SUM(score), GEOMETRIC_MEAN(score), GEOMEAN(score), HISTOGRAM_EXACT(score, [1, 2]), PRODUCT(score), WEIGHTED_AVG(score, weight), WAVG(score, weight), APPROX_QUANTILE(score, 0.5), RESERVOIR_QUANTILE(score, 0.5), KURTOSIS_POP(score), MAD(score), QUANTILE_CONT(score, 0.5), QUANTILE_DISC(score, 0.5), QUANTILE(score, 0.5), SEM(score) FROM source_table",
+		AnalyzeQueryOptions{Dialect: DialectDuckDB},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(analysis.Projections) != 22 {
+		t.Fatalf("projection count = %d, want 22", len(analysis.Projections))
+	}
+	for index, projection := range analysis.Projections {
+		if projection.TransformKind != "aggregation" {
+			t.Fatalf("projection %d transform kind = %q, want aggregation", index, projection.TransformKind)
+		}
+	}
+
+	generic, err := AnalyzeQuery("SELECT ARG_MAX_NULL(label, score) FROM source_table", AnalyzeQueryOptions{Dialect: DialectGeneric})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := generic.Projections[0].TransformKind; got != "function" {
+		t.Fatalf("generic ARG_MAX_NULL transform kind = %q, want function", got)
+	}
+}
+
+func TestAnalyzeQueryInfersDuckDBMinMaxTopNArrays(t *testing.T) {
+	schema := ValidationSchema{Tables: []SchemaTable{{
+		Name:    "source_table",
+		Columns: []SchemaColumn{{Name: "value", Type: "VARCHAR"}},
+	}}}
+	analysis, err := AnalyzeQuery(
+		"SELECT MIN(value, 2) AS minimum_values, MAX(value, 2) AS maximum_values, MIN(value) AS minimum_value FROM source_table",
+		AnalyzeQueryOptions{Dialect: DialectDuckDB, Schema: &schema},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ARRAY<VARCHAR>", "ARRAY<VARCHAR>", "VARCHAR"}
+	if len(analysis.OutputColumns) != len(want) {
+		t.Fatalf("output columns = %#v", analysis.OutputColumns)
+	}
+	for index, expected := range want {
+		if analysis.OutputColumns[index].TypeHint == nil || *analysis.OutputColumns[index].TypeHint != expected {
+			t.Fatalf("output[%d] = %#v, want %s", index, analysis.OutputColumns[index], expected)
+		}
+	}
+}
+
+func duckDBStructFieldTestSchema() ValidationSchema {
+	strict := true
+	return ValidationSchema{
+		Strict: &strict,
+		Tables: []SchemaTable{{
+			Name: "source_table",
+			Columns: []SchemaColumn{
+				{Name: "nested_items", Type: "STRUCT(field_value VARCHAR)[]"},
+				{Name: "composite_value", Type: "STRUCT(field_value VARCHAR, label VARCHAR)"},
+			},
+		}},
+	}
+}

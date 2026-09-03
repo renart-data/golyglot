@@ -198,9 +198,145 @@ func semanticRelations(query *SelectStmt, options AnalyzeQueryOptions, scope *se
 		}
 	}
 	for index := range query.From {
-		relations = append(relations, collectTableExpression(&query.From[index], collectItem)...)
+		table := &query.From[index]
+		left := collectItem(table.Primary)
+		relations = append(relations, left...)
+		scope.relations = relations
+		for _, join := range table.Joins {
+			before := len(relations)
+			right := collectItem(join.Right)
+			switch join.Kind {
+			case JoinLeft:
+				markSemanticRelationsNullable(right)
+			case JoinRight:
+				markSemanticRelationsNullable(relations[:before])
+			case JoinFull:
+				markSemanticRelationsNullable(relations[:before])
+				markSemanticRelationsNullable(right)
+			}
+			relations = append(relations, right...)
+			scope.relations = relations
+		}
 	}
 	return relations
+}
+
+type semanticStructPath struct {
+	relation  semanticRelation
+	rootIndex int
+}
+
+func normalizeDuckDBStructFieldReferences(query *SelectStmt, options AnalyzeQueryOptions) {
+	if query == nil || options.Schema == nil || options.Dialect != DialectDuckDB {
+		return
+	}
+	scope := &semanticScope{
+		ctes:    make(map[string][]semanticColumn),
+		dialect: options.Dialect,
+		schema:  options.Schema,
+	}
+	for _, cte := range query.With {
+		child := analyzeSelectSemantics(cte.Query, options, scope)
+		columns := cloneSemanticColumns(child.output)
+		if len(cte.Columns) > 0 {
+			for index := range columns {
+				if index < len(cte.Columns) {
+					columns[index].name = cte.Columns[index].Text
+				}
+			}
+		}
+		scope.ctes[strings.ToLower(cte.Name.Text)] = columns
+	}
+	var issues []semanticIssue
+	scope.relations = semanticRelations(query, options, scope, &issues)
+
+	Transform(query, func(node Node) Node {
+		identifier, ok := node.(*IdentifierExpr)
+		if !ok {
+			return node
+		}
+		path, ok := resolveSemanticStructPath(identifier, scope)
+		if !ok {
+			return node
+		}
+
+		rootParts := append([]Identifier(nil), identifier.Parts[:path.rootIndex+1]...)
+		if path.rootIndex == 0 {
+			qualifier := path.relation.alias
+			if qualifier == "" {
+				qualifier = path.relation.name
+			}
+			if parts, err := builderIdentifiers(qualifier); err == nil && len(parts) > 0 {
+				rootParts = append(parts, rootParts...)
+			}
+		}
+		var expression Expr = &IdentifierExpr{
+			nodeBase: nodeBase{span: identifier.SourceSpan()},
+			Parts:    rootParts,
+		}
+		for _, field := range identifier.Parts[path.rootIndex+1:] {
+			expression = &FieldExpr{
+				nodeBase: nodeBase{span: identifier.SourceSpan()},
+				Target:   expression,
+				Field:    field,
+			}
+		}
+		return expression
+	})
+}
+
+func resolveSemanticStructPath(value *IdentifierExpr, scope *semanticScope) (semanticStructPath, bool) {
+	if value == nil || len(value.Parts) < 2 {
+		return semanticStructPath{}, false
+	}
+	for current := scope; current != nil; current = current.parent {
+		for rootIndex := len(value.Parts) - 2; rootIndex >= 0; rootIndex-- {
+			qualifier := identifiersText(value.Parts[:rootIndex])
+			rootName := value.Parts[rootIndex].Text
+			matches := make([]semanticStructPath, 0, 1)
+			for _, relation := range current.relations {
+				if qualifier != "" && !semanticRelationMatches(relation, qualifier) {
+					continue
+				}
+				for _, column := range relation.columns {
+					if !strings.EqualFold(column.name, rootName) {
+						continue
+					}
+					if _, ok := semanticStructFieldType(column.dataType, value.Parts[rootIndex+1:]); ok {
+						matches = append(matches, semanticStructPath{relation: relation, rootIndex: rootIndex})
+					}
+				}
+			}
+			if len(matches) == 1 {
+				return matches[0], true
+			}
+			if len(matches) > 1 {
+				return semanticStructPath{}, false
+			}
+		}
+	}
+	return semanticStructPath{}, false
+}
+
+func semanticStructFieldType(dataType DataType, fields []Identifier) (DataType, bool) {
+	current := dataType
+	for _, fieldName := range fields {
+		if current.Kind != DataTypeStruct {
+			return DataType{}, false
+		}
+		found := false
+		for _, field := range current.Fields {
+			if strings.EqualFold(field.Name, fieldName.Text) {
+				current = field.Type
+				found = true
+				break
+			}
+		}
+		if !found {
+			return DataType{}, false
+		}
+	}
+	return current, true
 }
 
 func collectTableExpression(table *TableExpr, collect func(FromItem) []semanticRelation) []semanticRelation {
@@ -551,7 +687,15 @@ func inferSemanticFunction(value *FunctionCallExpr, scope *semanticScope, issues
 		return result
 	case "AVG", "STDDEV", "STDDEV_POP", "STDDEV_SAMP", "VARIANCE", "VAR_POP", "VAR_SAMP":
 		return known(DataTypeDouble, nullabilityUnknown)
-	case "MIN", "MAX", "FIRST", "LAST", "FIRST_VALUE", "LAST_VALUE", "ANY_VALUE", "MEDIAN", "PERCENTILE_CONT", "PERCENTILE_DISC":
+	case "MIN", "MAX":
+		result := arg(0)
+		if scope.dialect == DialectDuckDB && len(args) == 2 && result.dataType.Known() {
+			element := result.dataType
+			result.dataType = DataType{Kind: DataTypeArray, Element: &element}
+		}
+		result.nullability = nullabilityUnknown
+		return result
+	case "FIRST", "LAST", "FIRST_VALUE", "LAST_VALUE", "ANY_VALUE", "MEDIAN", "PERCENTILE_CONT", "PERCENTILE_DISC", "ARG_MAX", "ARG_MIN", "ARGMAX", "ARGMIN", "MAX_BY", "MIN_BY", "ARG_MAX_NULL", "ARG_MIN_NULL":
 		result := arg(0)
 		result.nullability = nullabilityUnknown
 		return result
