@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.6 - 2026-09-03
+
+- Preserve semantic grouping when rendering programmatically constructed
+  boolean and arithmetic expressions without changing lambda rendering.
+- Add DuckDB-aware `STRUCT` field resolution, including fields exposed through
+  `UNNEST`, across semantic validation, output analysis, and column lineage.
+- Expand aggregate classification and inference for DuckDB `MIN`/`MAX`
+  top-N arrays, and preserve safe modifiers when rewriting quantile,
+  `ANY_VALUE`, and `LIST` calls.
+
 ## 0.1.0-alpha.5 - 2026-08-26
 
 - Accept standalone `VALUES`, `VALUES` set operations, and `VALUES`-backed
