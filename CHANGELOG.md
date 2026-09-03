@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.7 - 2026-09-04
+
+- Prevent interval units from being reported as column references and guard
+  table-function lineage resolution against cycles, fixing a stack overflow
+  for DuckDB queries such as `range(..., INTERVAL 1 HOUR)`.
+
 ## 0.1.0-alpha.6 - 2026-09-03
 
 - Preserve semantic grouping when rendering programmatically constructed
