@@ -676,10 +676,23 @@ func inferSemanticFunction(value *FunctionCallExpr, scope *semanticScope, issues
 		result := arg(0)
 		switch result.dataType.Kind {
 		case DataTypeTinyInt, DataTypeSmallInt, DataTypeInteger:
-			result.dataType = DataType{Kind: DataTypeBigInt}
+			if scope.dialect == DialectDuckDB {
+				result.dataType = DataType{Kind: DataTypeHugeInt}
+			} else {
+				result.dataType = DataType{Kind: DataTypeBigInt}
+			}
+		case DataTypeBigInt:
+			if scope.dialect == DialectDuckDB {
+				result.dataType = DataType{Kind: DataTypeHugeInt}
+			}
 		case DataTypeFloat:
 			result.dataType = DataType{Kind: DataTypeDouble}
-		case DataTypeBigInt, DataTypeHugeInt, DataTypeDouble, DataTypeDecimal:
+		case DataTypeDecimal:
+			if scope.dialect == DialectDuckDB {
+				precision := 38
+				result.dataType.Precision = &precision
+			}
+		case DataTypeHugeInt, DataTypeDouble:
 		default:
 			result.dataType = DataType{Kind: DataTypeDecimal}
 		}
@@ -856,6 +869,10 @@ func coerceSemanticExpressions(left, right inferredExpression, dialect Dialect, 
 	}
 	if isSemanticNumeric(left.dataType) && isSemanticNumeric(right.dataType) {
 		if dialect == DialectDuckDB {
+			if floating, ok := duckDBFloatingDecimalType(left.dataType, right.dataType); ok {
+				result.dataType = floating
+				return result
+			}
 			if left.hasColumn && right.integerLiteral != nil && integerFitsSemanticType(*right.integerLiteral, left.dataType) {
 				result.dataType = left.dataType
 				return result
@@ -882,6 +899,16 @@ func coerceSemanticExpressions(left, right inferredExpression, dialect Dialect, 
 	}
 	result.dataType = left.dataType
 	return result
+}
+
+func duckDBFloatingDecimalType(left, right DataType) (DataType, bool) {
+	if left.Kind == DataTypeDecimal && (right.Kind == DataTypeFloat || right.Kind == DataTypeDouble) {
+		return right, true
+	}
+	if right.Kind == DataTypeDecimal && (left.Kind == DataTypeFloat || left.Kind == DataTypeDouble) {
+		return left, true
+	}
+	return DataType{}, false
 }
 
 func semanticDataTypesEqual(left, right DataType) bool {

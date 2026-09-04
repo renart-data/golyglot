@@ -1,6 +1,7 @@
 # Differential type-inference oracle
 
-Status: DuckDB vertical slice implemented on the experiment branch.
+Status: DuckDB discovery and regression vertical slice implemented on the
+experiment branch.
 
 ## Outcome
 
@@ -15,6 +16,8 @@ Golyglot package or executing user data.
 make type-oracle-duckdb
 go run ./cmd/golyglot-type-oracle --seed 42 --cases 24
 go run ./cmd/golyglot-type-oracle --seed 42 --cases 24 --json
+go run ./cmd/golyglot-type-oracle --corpus curated --fail-on-unexpected
+go run ./cmd/golyglot-type-oracle --corpus all --write-findings findings.json
 ```
 
 It provides:
@@ -26,10 +29,19 @@ It provides:
   schema/view;
 - normalized type comparison with match, kind mismatch, modifier mismatch,
   shape mismatch, unknown, timeout, and crash outcomes;
-- human and JSON reports; mismatches are informational unless
-  `--fail-on-mismatch` is selected;
+- stable feature tags with per-feature metrics in human and JSON reports;
+- generated, curated, or combined corpora, with DuckDB-version-scoped expected
+  outcomes for known regressions;
+- reduced, self-contained finding bundles written atomically on request;
+- mismatches are informational unless `--fail-on-mismatch` is selected; new or
+  changed results can be gated separately with `--fail-on-unexpected`;
 - no CGO, Python package, network, extension, file, or production database
   dependency.
+
+The first curated DuckDB 1.5 corpus covers integer and decimal `SUM` promotion
+plus floating-point/decimal coercion. Those six cases were first captured as
+real binder mismatches, turned into failing unit tests, fixed in Golyglot, and
+now remain as engine-backed regression cases.
 
 The prototype compares types only. DuckDB query description does not preserve
 reliable nullability metadata, so nullability must not be scored as a match.
@@ -43,7 +55,7 @@ seed + capability profile
   -> database binder adapter
   -> normalized comparator
   -> mismatch corpus + metrics
-  -> reducer (next phase)
+  -> reducer + version-pinned regression corpus
 ```
 
 ### Typed generator
@@ -153,16 +165,22 @@ must become one bounded result, not terminate the lab controller.
   to an old golden file as if Golyglot changed.
 - Add weekly rotating seeds for discovery and fixed seeds for trend metrics.
 
+## Completed in this slice
+
+1. Stable expression feature tags and per-feature metrics.
+2. AST-aware schema reduction and atomic finding-bundle emission.
+3. A version-pinned DuckDB 1.5 curated regression corpus.
+4. DuckDB numeric aggregate and decimal/floating coercion fixes developed test
+   first from the captured mismatches.
+
 ## Near-term backlog
 
-1. Add expression feature tags and per-feature metrics.
-2. Implement AST-aware reduction and fixture emission.
-3. Add curated cases for the first DuckDB mismatches.
-4. Expand decimal arithmetic/aggregate rules and rerun fixed seeds.
-5. Add PostgreSQL Describe adapter and OID-to-type normalization.
-6. Add Trino `DESCRIBE OUTPUT` adapter.
-7. Add nested/list/struct/map and temporal interval grammars.
-8. Publish a compact nightly trend artifact, not a noisy issue per mismatch.
+1. Minimize expressions and clauses in addition to the already implemented
+   schema reduction.
+2. Add PostgreSQL Describe adapter and OID-to-type normalization.
+3. Add Trino `DESCRIBE OUTPUT` adapter.
+4. Add nested/list/struct/map and temporal interval grammars.
+5. Publish a compact nightly trend artifact, not a noisy issue per mismatch.
 
 ## Acceptance criteria
 

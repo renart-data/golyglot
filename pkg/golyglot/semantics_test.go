@@ -93,6 +93,52 @@ func TestAnalyzeQueryInfersCTEStarsAndDuckDBRangeArithmetic(t *testing.T) {
 	}
 }
 
+func TestAnalyzeQueryMatchesDuckDBNumericPromotion(t *testing.T) {
+	nullable := true
+	schema := ValidationSchema{Tables: []SchemaTable{{
+		Name: "numbers",
+		Columns: []SchemaColumn{
+			{Name: "tiny_value", Type: "TINYINT", Nullable: &nullable},
+			{Name: "small_value", Type: "SMALLINT", Nullable: &nullable},
+			{Name: "integer_value", Type: "INTEGER", Nullable: &nullable},
+			{Name: "bigint_value", Type: "BIGINT", Nullable: &nullable},
+			{Name: "hugeint_value", Type: "HUGEINT", Nullable: &nullable},
+			{Name: "float_value", Type: "FLOAT", Nullable: &nullable},
+			{Name: "double_value", Type: "DOUBLE", Nullable: &nullable},
+			{Name: "decimal_value", Type: "DECIMAL(18, 4)", Nullable: &nullable},
+		},
+	}}}
+	tests := []struct {
+		expression string
+		want       string
+	}{
+		{expression: "SUM(tiny_value)", want: "HUGEINT"},
+		{expression: "SUM(small_value)", want: "HUGEINT"},
+		{expression: "SUM(integer_value)", want: "HUGEINT"},
+		{expression: "SUM(bigint_value)", want: "HUGEINT"},
+		{expression: "SUM(hugeint_value)", want: "HUGEINT"},
+		{expression: "SUM(decimal_value)", want: "DECIMAL(38, 4)"},
+		{expression: "float_value + decimal_value", want: "FLOAT"},
+		{expression: "decimal_value + float_value", want: "FLOAT"},
+		{expression: "double_value + decimal_value", want: "DOUBLE"},
+		{expression: "decimal_value + double_value", want: "DOUBLE"},
+	}
+	for _, test := range tests {
+		t.Run(test.expression, func(t *testing.T) {
+			analysis, err := AnalyzeQuery(
+				"SELECT "+test.expression+" AS value FROM numbers",
+				AnalyzeQueryOptions{Dialect: DialectDuckDB, Schema: &schema},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(analysis.OutputColumns) != 1 || analysis.OutputColumns[0].TypeHint == nil || *analysis.OutputColumns[0].TypeHint != test.want {
+				t.Fatalf("output = %#v, want %s", analysis.OutputColumns, test.want)
+			}
+		})
+	}
+}
+
 func TestAnalyzeQueryInfersDuckDBRangeUnnestAndTemporalArithmetic(t *testing.T) {
 	analysis, err := AnalyzeQuery(
 		`SELECT event_id, current_date - 2 AS event_date, current_timestamp - (event_id * INTERVAL '10 minutes') AS observed_at FROM (SELECT unnest(range(1, 3)) AS event_id) AS events`,

@@ -10,7 +10,7 @@ example:
 
 ```text
 lineitems.total_amount  INTEGER -> DOUBLE
-  -> revenue.total = SUM(total_amount)  BIGINT -> DOUBLE
+  -> revenue.total = SUM(total_amount)  HUGEINT -> DOUBLE  (DuckDB)
 ```
 
 This is an impact analysis, not a proof that two queries are equivalent.

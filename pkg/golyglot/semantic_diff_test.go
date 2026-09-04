@@ -32,7 +32,7 @@ func TestDiffQuerySemanticsFindsPropagatedTypeChange(t *testing.T) {
 	if !output.TypeChanged || output.Origin != SemanticChangePropagated {
 		t.Fatalf("output change = %#v", output)
 	}
-	if output.Before == nil || output.After == nil || semanticDiffOutputType(*output.Before) != "BIGINT" || semanticDiffOutputType(*output.After) != "DOUBLE" {
+	if output.Before == nil || output.After == nil || semanticDiffOutputType(*output.Before) != "HUGEINT" || semanticDiffOutputType(*output.After) != "DOUBLE" {
 		t.Fatalf("output contract = %#v -> %#v", output.Before, output.After)
 	}
 	if len(output.Upstream) != 1 || output.Upstream[0].Column != "total_amount" {
@@ -143,6 +143,72 @@ func TestDiffQuerySemanticsDoesNotClaimUnknownTypesAreComplete(t *testing.T) {
 	}
 }
 
+func TestDiffQuerySemanticsClassifiesBehaviorChangesWithStableOutput(t *testing.T) {
+	before := "SELECT user_id, SUM(amount) AS total FROM sales WHERE status = 'paid' GROUP BY user_id HAVING SUM(amount) > 0 ORDER BY total DESC LIMIT 10"
+	after := "SELECT user_id, SUM(amount) AS total FROM sales WHERE status = 'settled' GROUP BY user_id HAVING SUM(amount) > 0 ORDER BY total DESC LIMIT 10"
+	schema := semanticBehaviorSchema()
+	diff, err := DiffQuerySemantics(before, after, QuerySemanticDiffOptions{
+		Dialect: DialectDuckDB, BeforeSchema: schema, AfterSchema: schema,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff.BeforeBehavior.Fingerprint == "" || diff.AfterBehavior.Fingerprint == "" {
+		t.Fatalf("missing behavior fingerprints: %#v", diff)
+	}
+	if diff.BeforeBehavior.Fingerprint == diff.AfterBehavior.Fingerprint {
+		t.Fatalf("filter edit did not change behavior fingerprint: %#v", diff)
+	}
+	if len(diff.OutputChanges) != 0 {
+		t.Fatalf("filter edit changed output contract: %#v", diff.OutputChanges)
+	}
+	if len(diff.BehaviorChanges) != 1 || diff.BehaviorChanges[0].Kind != QueryBehaviorFilter {
+		t.Fatalf("behavior changes = %#v", diff.BehaviorChanges)
+	}
+}
+
+func TestDiffQuerySemanticsBehaviorFingerprintIgnoresFormatting(t *testing.T) {
+	before := "SELECT DISTINCT user_id FROM sales WHERE status = 'paid' ORDER BY user_id"
+	after := "-- presentation only\nselect distinct\n user_id\nfrom sales\nwhere status='paid'\norder by user_id;"
+	schema := semanticBehaviorSchema()
+	diff, err := DiffQuerySemantics(before, after, QuerySemanticDiffOptions{
+		Dialect: DialectDuckDB, BeforeSchema: schema, AfterSchema: schema,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff.BeforeBehavior.Fingerprint != diff.AfterBehavior.Fingerprint || len(diff.BehaviorChanges) != 0 {
+		t.Fatalf("formatting changed behavior: %#v", diff)
+	}
+}
+
+func TestDiffQuerySemanticsTracksJoinAndDirectiveBehavior(t *testing.T) {
+	schema := semanticBehaviorSchema()
+	joinDiff, err := DiffQuerySemantics(
+		"SELECT s.user_id FROM sales AS s JOIN users AS u ON s.user_id = u.id",
+		"SELECT s.user_id FROM sales AS s LEFT JOIN users AS u ON s.user_id = u.id",
+		QuerySemanticDiffOptions{Dialect: DialectDuckDB, BeforeSchema: schema, AfterSchema: schema},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(joinDiff.BehaviorChanges) != 1 || joinDiff.BehaviorChanges[0].Kind != QueryBehaviorRelations {
+		t.Fatalf("join behavior changes = %#v", joinDiff.BehaviorChanges)
+	}
+
+	directiveDiff, err := DiffQuerySemantics(
+		"SELECT user_id FROM sales",
+		"SELECT /*+ FORCE_INDEX(sales) */ user_id FROM sales",
+		QuerySemanticDiffOptions{Dialect: DialectDuckDB, BeforeSchema: schema, AfterSchema: schema},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directiveDiff.BehaviorChanges) != 1 || directiveDiff.BehaviorChanges[0].Kind != QueryBehaviorDirectives {
+		t.Fatalf("directive behavior changes = %#v", directiveDiff.BehaviorChanges)
+	}
+}
+
 func semanticDiffSchema(dataType string) *ValidationSchema {
 	nullable := false
 	return &ValidationSchema{Tables: []SchemaTable{{
@@ -151,6 +217,18 @@ func semanticDiffSchema(dataType string) *ValidationSchema {
 			Name: "total_amount", Type: dataType, Nullable: &nullable,
 		}},
 	}}}
+}
+
+func semanticBehaviorSchema() *ValidationSchema {
+	nullable := false
+	return &ValidationSchema{Tables: []SchemaTable{
+		{Name: "sales", Columns: []SchemaColumn{
+			{Name: "user_id", Type: "INTEGER", Nullable: &nullable},
+			{Name: "amount", Type: "DECIMAL(18, 2)", Nullable: &nullable},
+			{Name: "status", Type: "VARCHAR", Nullable: &nullable},
+		}},
+		{Name: "users", Columns: []SchemaColumn{{Name: "id", Type: "INTEGER", Nullable: &nullable}}},
+	}}
 }
 
 func semanticDiffType(contract SemanticColumnContract) string {

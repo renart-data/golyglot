@@ -7,6 +7,15 @@ import (
 	"github.com/renart-data/golyglot/pkg/golyglot"
 )
 
+const GeneratorVersion = "v2"
+
+type CaseSource string
+
+const (
+	CaseSourceGenerated CaseSource = "generated"
+	CaseSourceCurated   CaseSource = "curated"
+)
+
 type Status string
 
 const (
@@ -27,20 +36,52 @@ type Column struct {
 	Type string `json:"type,omitempty"`
 }
 
+type ExpectedOutcome struct {
+	Engine              string   `json:"engine"`
+	EngineVersionPrefix string   `json:"engineVersionPrefix"`
+	Status              Status   `json:"status"`
+	Observed            []Column `json:"observed,omitempty"`
+}
+
+type ExpectationEvaluation struct {
+	Applicable bool   `json:"applicable"`
+	Matched    bool   `json:"matched"`
+	Detail     string `json:"detail,omitempty"`
+}
+
 type QueryCase struct {
-	ID      string                     `json:"id"`
-	SQL     string                     `json:"sql"`
-	Dialect golyglot.Dialect           `json:"dialect"`
-	Schema  *golyglot.ValidationSchema `json:"schema"`
+	ID               string                     `json:"id"`
+	SQL              string                     `json:"sql"`
+	Dialect          golyglot.Dialect           `json:"dialect"`
+	Schema           *golyglot.ValidationSchema `json:"schema"`
+	GeneratorVersion string                     `json:"generatorVersion"`
+	Source           CaseSource                 `json:"source"`
+	Features         []string                   `json:"features"`
+	Expected         *ExpectedOutcome           `json:"expected,omitempty"`
 }
 
 type Result struct {
-	CaseID   string   `json:"caseId"`
-	SQL      string   `json:"sql"`
-	Status   Status   `json:"status"`
-	Detail   string   `json:"detail,omitempty"`
-	Inferred []Column `json:"inferred,omitempty"`
-	Observed []Column `json:"observed,omitempty"`
+	CaseID           string                     `json:"caseId"`
+	SQL              string                     `json:"sql"`
+	Dialect          golyglot.Dialect           `json:"dialect"`
+	Schema           *golyglot.ValidationSchema `json:"schema"`
+	GeneratorVersion string                     `json:"generatorVersion"`
+	Source           CaseSource                 `json:"source"`
+	Features         []string                   `json:"features"`
+	Status           Status                     `json:"status"`
+	Detail           string                     `json:"detail,omitempty"`
+	Inferred         []Column                   `json:"inferred,omitempty"`
+	Observed         []Column                   `json:"observed,omitempty"`
+	Expectation      *ExpectationEvaluation     `json:"expectation,omitempty"`
+}
+
+func NewResult(testCase QueryCase, status Status, detail string) Result {
+	return Result{
+		CaseID: testCase.ID, SQL: testCase.SQL, Dialect: testCase.Dialect,
+		Schema: testCase.Schema, GeneratorVersion: testCase.GeneratorVersion,
+		Source: testCase.Source, Features: append([]string(nil), testCase.Features...),
+		Status: status, Detail: detail,
+	}
 }
 
 func Infer(testCase QueryCase) ([]Column, error) {
@@ -63,7 +104,9 @@ func Infer(testCase QueryCase) ([]Column, error) {
 }
 
 func Compare(testCase QueryCase, inferred, observed []Column) Result {
-	result := Result{CaseID: testCase.ID, SQL: testCase.SQL, Inferred: inferred, Observed: observed}
+	result := NewResult(testCase, "", "")
+	result.Inferred = inferred
+	result.Observed = observed
 	if len(inferred) != len(observed) {
 		result.Status = StatusShapeMismatch
 		result.Detail = fmt.Sprintf("column count: golyglot=%d duckdb=%d", len(inferred), len(observed))
@@ -105,4 +148,48 @@ func Compare(testCase QueryCase, inferred, observed []Column) Result {
 	}
 	result.Status = StatusMatch
 	return result
+}
+
+func EvaluateExpectation(result Result, testCase QueryCase, engine, engineVersion string) *ExpectationEvaluation {
+	if testCase.Expected == nil {
+		return nil
+	}
+	expected := testCase.Expected
+	evaluation := &ExpectationEvaluation{}
+	if !strings.EqualFold(strings.TrimSpace(expected.Engine), strings.TrimSpace(engine)) {
+		evaluation.Detail = fmt.Sprintf("expectation is for engine %q", expected.Engine)
+		return evaluation
+	}
+	if prefix := strings.TrimSpace(expected.EngineVersionPrefix); prefix != "" && !strings.HasPrefix(engineVersion, prefix) {
+		evaluation.Detail = fmt.Sprintf("expectation is for engine version prefix %q", prefix)
+		return evaluation
+	}
+	evaluation.Applicable = true
+	if result.Status != expected.Status {
+		evaluation.Detail = fmt.Sprintf("status=%s, expected=%s", result.Status, expected.Status)
+		return evaluation
+	}
+	if len(expected.Observed) > 0 && !oracleColumnsEqual(result.Observed, expected.Observed, testCase.Dialect) {
+		evaluation.Detail = fmt.Sprintf("observed=%v, expected=%v", result.Observed, expected.Observed)
+		return evaluation
+	}
+	evaluation.Matched = true
+	return evaluation
+}
+
+func oracleColumnsEqual(left, right []Column, dialect golyglot.Dialect) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if !strings.EqualFold(left[index].Name, right[index].Name) {
+			return false
+		}
+		leftType, leftErr := golyglot.ParseDataType(left[index].Type, dialect)
+		rightType, rightErr := golyglot.ParseDataType(right[index].Type, dialect)
+		if leftErr != nil || rightErr != nil || leftType.SQL() != rightType.SQL() {
+			return false
+		}
+	}
+	return true
 }

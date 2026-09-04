@@ -1,0 +1,38 @@
+[
+  {
+    "id": "duckdb-v1.5-sum-tinyint",
+    "sql": "SELECT SUM(tiny_col) AS value FROM oracle_values",
+    "features": ["aggregate", "aggregate:sum", "input:tinyint"],
+    "expected": {"engine": "duckdb", "engineVersionPrefix": "v1.5.", "status": "match", "observed": [{"name": "value", "type": "HUGEINT"}]}
+  },
+  {
+    "id": "duckdb-v1.5-sum-smallint",
+    "sql": "SELECT SUM(small_col) AS value FROM oracle_values",
+    "features": ["aggregate", "aggregate:sum", "input:smallint"],
+    "expected": {"engine": "duckdb", "engineVersionPrefix": "v1.5.", "status": "match", "observed": [{"name": "value", "type": "HUGEINT"}]}
+  },
+  {
+    "id": "duckdb-v1.5-sum-integer",
+    "sql": "SELECT SUM(integer_col) AS value FROM oracle_values",
+    "features": ["aggregate", "aggregate:sum", "input:integer"],
+    "expected": {"engine": "duckdb", "engineVersionPrefix": "v1.5.", "status": "match", "observed": [{"name": "value", "type": "HUGEINT"}]}
+  },
+  {
+    "id": "duckdb-v1.5-sum-bigint",
+    "sql": "SELECT SUM(bigint_col) AS value FROM oracle_values",
+    "features": ["aggregate", "aggregate:sum", "input:bigint"],
+    "expected": {"engine": "duckdb", "engineVersionPrefix": "v1.5.", "status": "match", "observed": [{"name": "value", "type": "HUGEINT"}]}
+  },
+  {
+    "id": "duckdb-v1.5-sum-decimal",
+    "sql": "SELECT SUM(decimal_col) AS value FROM oracle_values",
+    "features": ["aggregate", "aggregate:sum", "input:decimal"],
+    "expected": {"engine": "duckdb", "engineVersionPrefix": "v1.5.", "status": "match", "observed": [{"name": "value", "type": "DECIMAL(38, 4)"}]}
+  },
+  {
+    "id": "duckdb-v1.5-add-double-decimal",
+    "sql": "SELECT double_col + decimal_col AS value FROM oracle_values",
+    "features": ["arithmetic", "arithmetic:add", "input:decimal", "input:double", "mixed-inputs"],
+    "expected": {"engine": "duckdb", "engineVersionPrefix": "v1.5.", "status": "match", "observed": [{"name": "value", "type": "DOUBLE"}]}
+  }
+]
