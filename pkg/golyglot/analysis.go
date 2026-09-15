@@ -27,6 +27,7 @@ type QueryAnalysis struct {
 	OutputColumns       []QueryOutputColumnFact `json:"outputColumns"`
 	OutputNamesComplete bool                    `json:"outputNamesComplete"`
 	OutputTypesComplete bool                    `json:"outputTypesComplete"`
+	ColumnUses          []ColumnUseFact         `json:"columnUses,omitempty"`
 }
 
 // QueryOutputColumnFact is the schema fact inferred for one concrete output
@@ -77,6 +78,7 @@ type ColumnReferenceFact struct {
 	Column      string  `json:"column"`
 	Unqualified bool    `json:"unqualified"`
 	Confidence  string  `json:"confidence"`
+	Span        *Span   `json:"span,omitempty"`
 }
 
 type RelationFact struct {
@@ -190,6 +192,7 @@ func analyzeSelectFacts(selectStmt *SelectStmt, options AnalyzeQueryOptions) Que
 		result.OutputColumns = append(result.OutputColumns, fact)
 	}
 	collectSetFacts(selectStmt, &result, options.Dialect)
+	result.ColumnUses = queryColumnUses(bindQuery(selectStmt, options))
 	return result
 }
 

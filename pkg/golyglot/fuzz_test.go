@@ -10,6 +10,10 @@ func FuzzTolerantParseNeverPanics(f *testing.F) {
 		"SELECT ((1 + 2)",
 		"SELECT 'unfinished",
 		"WITH x AS (SELECT 1) SELECT * FROM x",
+		"a.:S1(",
+		"SELECT CAST(x AS UserDefinedType(",
+		"SELECT JSON_VALUE(a, '$.b' RETURNING VARCHAR2(",
+		"IF~IF~IF~IF~I?{",
 	} {
 		f.Add(seed)
 	}
@@ -41,5 +45,25 @@ func FuzzSyntacticContextNeverPanics(f *testing.F) {
 		}
 		cursor %= len(sql) + 1
 		_, _ = SyntacticContextAt(sql, cursor, DialectGeneric)
+	})
+}
+
+func FuzzSchemaScopeAnalysisNeverPanics(f *testing.F) {
+	for _, sql := range []string{
+		"SELECT o.id FROM t1 o WHERE EXISTS (SELECT 1 FROM t2 i WHERE i.id = o.id)",
+		"WITH a AS (SELECT value AS amount FROM t1), b AS (SELECT * FROM a) SELECT id FROM b WHERE amount > 0",
+		"WITH RECURSIVE a(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM a WHERE n < 3) SELECT n FROM a",
+		"SELECT id FROM t1 JOIN t2 USING (id)",
+		"SELECT id FROM t2 WHERE id IN (SELECT value FROM t1)",
+	} {
+		f.Add(sql)
+	}
+	f.Fuzz(func(t *testing.T, sql string) {
+		if len(sql) > 4096 {
+			t.Skip()
+		}
+		schema := upstreamScopeSchema()
+		ValidateWithSchema(sql, schema, DialectDuckDB)
+		_, _ = AnalyzeQuery(sql, AnalyzeQueryOptions{Dialect: DialectDuckDB, Schema: &schema})
 	})
 }
