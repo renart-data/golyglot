@@ -313,6 +313,18 @@ func (c *validationCollector) selectStatement(selectStmt *SelectStmt) {
 	if c.schema != nil {
 		normalizeDuckDBStructFieldReferences(selectStmt, AnalyzeQueryOptions{Dialect: c.dialect, Schema: c.schema})
 	}
+	root := bindQuery(selectStmt, AnalyzeQueryOptions{Dialect: c.dialect, Schema: c.schema})
+	for _, scope := range root.bindings.scopes {
+		c.selectScope(scope)
+	}
+	semantics := analyzeSelectSemantics(selectStmt, AnalyzeQueryOptions{Dialect: c.dialect, Schema: c.schema}, nil)
+	for _, issue := range semantics.issues {
+		c.add(SeverityError, issue.code, issue.message, issue.span)
+	}
+}
+
+func (c *validationCollector) selectScope(scope *queryScope) {
+	selectStmt := scope.query
 	hasQueryBody := len(selectStmt.Projections) > 0 ||
 		len(selectStmt.ValuesRows) > 0 ||
 		(selectStmt.SetLeft != nil && selectStmt.SetRight != nil)
@@ -326,15 +338,17 @@ func (c *validationCollector) selectStatement(selectStmt *SelectStmt) {
 			c.add(SeverityError, "SEMANTIC_DUPLICATE_CTE", fmt.Sprintf("CTE %q is declared more than once", cte.Name.Text), cte.Span)
 		}
 		cteNames[key] = true
-		c.selectStatement(cte.Query)
 	}
 
-	relations := collectValidationRelations(selectStmt)
 	aliases := make(map[string]bool)
-	for _, relation := range relations {
-		key := strings.ToLower(relation.lookupName)
+	for _, relation := range scope.relations {
+		name := relation.name
+		if relation.alias != "" {
+			name = relation.alias
+		}
+		key := strings.ToLower(name)
 		if key != "" && aliases[key] {
-			c.add(SeverityError, "SEMANTIC_DUPLICATE_RELATION_ALIAS", fmt.Sprintf("relation alias %q is used more than once", relation.displayName), relation.span)
+			c.add(SeverityError, "SEMANTIC_DUPLICATE_RELATION_ALIAS", fmt.Sprintf("relation alias %q is used more than once", name), relation.span)
 		}
 		if key != "" {
 			aliases[key] = true
@@ -356,18 +370,7 @@ func (c *validationCollector) selectStatement(selectStmt *SelectStmt) {
 	}
 
 	if c.schema != nil {
-		c.validateSchemaRelations(relations)
-		c.validateSchemaColumns(selectStmt, relations)
-	}
-	semantics := analyzeSelectSemantics(selectStmt, AnalyzeQueryOptions{Dialect: c.dialect, Schema: c.schema}, nil)
-	for _, issue := range semantics.issues {
-		c.add(SeverityError, issue.code, issue.message, issue.span)
-	}
-	if selectStmt.SetLeft != nil {
-		c.selectStatement(selectStmt.SetLeft)
-	}
-	if selectStmt.SetRight != nil {
-		c.selectStatement(selectStmt.SetRight)
+		c.validateBoundSchema(scope)
 	}
 	if selectStmt.SetRight != nil {
 		left := selectStmt
@@ -382,141 +385,62 @@ func (c *validationCollector) selectStatement(selectStmt *SelectStmt) {
 	}
 }
 
-type validationRelation struct {
-	lookupName  string
-	displayName string
-	baseName    string
-	alias       string
-	kind        string
-	span        Span
-	columns     map[string]SchemaColumn
-	known       bool
-}
-
-func collectValidationRelations(selectStmt *SelectStmt) []validationRelation {
-	var result []validationRelation
-	cteQueries := make(map[string]*SelectStmt)
-	for _, cte := range selectStmt.With {
-		if cte.Query != nil {
-			cteQueries[strings.ToLower(cte.Name.Text)] = cte.Query
+func (c *validationCollector) validateBoundSchema(scope *queryScope) {
+	severity := SeverityWarning
+	if c.schema.Strict != nil && *c.schema.Strict {
+		severity = SeverityError
+	}
+	for _, relation := range scope.relations {
+		if relation.kind == "table" && !relation.known {
+			c.add(severity, "SCHEMA_UNKNOWN_TABLE", fmt.Sprintf("table %q is not present in the supplied schema", relation.name), relation.span)
 		}
 	}
-	var collectFrom func(FromItem)
-	collectFrom = func(item FromItem) {
-		switch value := item.(type) {
-		case *TableName:
-			baseName := identifiersText(value.Parts)
-			lookup := baseName
-			if value.Alias != nil {
-				lookup = value.Alias.Text
-			}
-			kind := "table"
-			columns := map[string]SchemaColumn(nil)
-			if cteQuery := cteQueries[strings.ToLower(lastIdentifier(baseName))]; cteQuery != nil {
-				kind = "cte"
-				columns = make(map[string]SchemaColumn)
-				for _, column := range outputNames(cteQuery, nil) {
-					columns[strings.ToLower(column)] = SchemaColumn{Name: column}
-				}
-			}
-			result = append(result, validationRelation{lookupName: lookup, displayName: baseName, baseName: baseName, alias: optionalIdentifierText(value.Alias), kind: kind, columns: columns, span: value.SourceSpan()})
-		case *SubqueryFrom:
-			name := optionalIdentifierText(value.Alias)
-			result = append(result, validationRelation{lookupName: name, displayName: name, alias: name, kind: "derived", span: value.SourceSpan()})
-		case *GroupedFrom:
-			for i := range value.Items {
-				if value.Items[i].Primary != nil {
-					collectFrom(value.Items[i].Primary)
-				}
-			}
-		case *TableFunctionFrom:
-			name := identifiersText(value.Name)
-			if value.Alias != nil {
-				name = value.Alias.Text
-			}
-			columns := make(map[string]SchemaColumn)
-			for _, column := range value.Columns {
-				columns[strings.ToLower(column.Text)] = SchemaColumn{Name: column.Text}
-			}
-			if len(columns) == 0 && len(value.Name) > 0 {
-				column := strings.ToLower(value.Name[len(value.Name)-1].Text)
-				columns[column] = SchemaColumn{Name: column}
-			}
-			result = append(result, validationRelation{lookupName: name, displayName: name, alias: optionalIdentifierText(value.Alias), kind: "virtual", columns: columns, span: value.SourceSpan()})
-		}
-	}
-	for i := range selectStmt.From {
-		if selectStmt.From[i].Primary != nil {
-			collectFrom(selectStmt.From[i].Primary)
-		}
-		for _, join := range selectStmt.From[i].Joins {
-			if join.Right != nil {
-				collectFrom(join.Right)
-			}
-		}
-	}
-	return result
-}
-
-func (c *validationCollector) validateSchemaRelations(relations []validationRelation) {
-	strict := c.schema.Strict != nil && *c.schema.Strict
-	for i := range relations {
-		relation := &relations[i]
-		if relation.kind != "" && relation.kind != "table" {
-			relation.known = true
-			continue
-		}
-		table, ok := findSchemaTable(*c.schema, relation.baseName)
-		if !ok {
-			severity := SeverityWarning
-			if strict {
-				severity = SeverityError
-			}
-			c.add(severity, "SCHEMA_UNKNOWN_TABLE", fmt.Sprintf("table %q is not present in the supplied schema", relation.baseName), relation.span)
-			continue
-		}
-		relation.known = true
-		relation.columns = make(map[string]SchemaColumn, len(table.Columns))
-		for _, column := range table.Columns {
-			relation.columns[strings.ToLower(column.Name)] = column
-		}
-	}
-}
-
-func (c *validationCollector) validateSchemaColumns(selectStmt *SelectStmt, relations []validationRelation) {
-	if c.schema == nil {
-		return
-	}
-	strict := c.schema.Strict != nil && *c.schema.Strict
-	for _, reference := range Columns(selectStmt) {
-		if reference.Column == "" || reference.Column == "*" {
-			continue
-		}
-		if strings.Contains(reference.Column, "(") {
-			continue
-		}
-		matches := make([]validationRelation, 0, len(relations))
-		for _, relation := range relations {
-			if reference.Table != "" && !strings.EqualFold(reference.Table, relation.lookupName) && !strings.EqualFold(reference.Table, relation.baseName) && !strings.EqualFold(reference.Table, relation.alias) {
-				continue
-			}
-			if relation.columns == nil {
-				continue
-			}
-			if _, ok := relation.columns[strings.ToLower(reference.Column)]; ok {
-				matches = append(matches, relation)
-			}
-		}
-		if len(matches) == 0 {
-			severity := SeverityWarning
-			if strict {
-				severity = SeverityError
-			}
-			c.add(severity, "SCHEMA_UNKNOWN_COLUMN", fmt.Sprintf("column %q is not present in the supplied schema", reference.Column), reference.Span)
-		} else if reference.Table == "" && len(matches) > 1 {
+	validate := func(binding boundReference) {
+		reference := binding.reference
+		switch binding.status {
+		case "ambiguous":
 			c.add(SeverityError, "SEMANTIC_AMBIGUOUS_COLUMN", fmt.Sprintf("column %q is ambiguous across relations", reference.Column), reference.Span)
+		case "missing", "unknown":
+			c.add(severity, "SCHEMA_UNKNOWN_COLUMN", fmt.Sprintf("column %q is not present in the supplied schema", reference.Column), reference.Span)
 		}
 	}
+	for _, span := range scope.usingOrder {
+		for _, binding := range scope.using[span] {
+			validate(binding)
+		}
+	}
+	aliasContexts := make(map[Span]bool)
+	for _, order := range scope.query.OrderBy {
+		aliasContexts[order.Expr.SourceSpan()] = true
+	}
+	for _, expression := range scope.query.GroupBy {
+		aliasContexts[expression.SourceSpan()] = false
+	}
+	for _, expression := range []Expr{scope.query.Having, scope.query.Qualify} {
+		if expression != nil {
+			aliasContexts[expression.SourceSpan()] = false
+		}
+	}
+	walkScopeColumns(scope.query, func(reference ColumnReference) {
+		binding := scope.atReference(reference).resolve(reference)
+		if reference.Table == "" {
+			for span, preferAlias := range aliasContexts {
+				if reference.Span.Start < span.Start || reference.Span.End > span.End || (!preferAlias && binding.status != "missing") {
+					continue
+				}
+				for _, projection := range scope.query.Projections {
+					if projection.Alias != nil && strings.EqualFold(projection.Alias.Text, reference.Column) {
+						for _, projected := range scope.references(projection.Expr, false) {
+							projected.reference.Span = reference.Span
+							validate(projected)
+						}
+						return
+					}
+				}
+			}
+		}
+		validate(binding)
+	})
 }
 
 func findSchemaTable(schema ValidationSchema, name string) (SchemaTable, bool) {

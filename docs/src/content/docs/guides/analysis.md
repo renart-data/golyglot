@@ -22,6 +22,7 @@ notNull := false
 schema := golyglot.ValidationSchema{Tables: []golyglot.SchemaTable{{
 	Name: "orders",
 	Columns: []golyglot.SchemaColumn{
+		{Name: "customer_id", Type: "BIGINT", Nullable: &notNull},
 		{Name: "amount", Type: "DECIMAL(10, 2)", Nullable: &notNull},
 	},
 }}}
@@ -65,6 +66,43 @@ result := golyglot.ValidateWithOptions(sql, golyglot.ValidationOptions{
 For compact facts, call `AnalyzeQuery`. It reports projections, relations,
 CTEs, set operations, base tables, and inferred output columns without
 requiring callers to walk the AST themselves.
+
+`ColumnUses` adds dependencies outside the select list. Each entry describes
+one expression and its context: `join`, `filter`, `group`, `having`, `qualify`,
+`window_partition`, `window_order`, `order`, `connect_by`, `subquery`, or
+`set_filter` (the filtering side of `EXCEPT`/`INTERSECT`).
+
+```go
+analysis, err := golyglot.AnalyzeQuery(
+	"SELECT customer_id FROM orders WHERE amount > 100",
+	golyglot.AnalyzeQueryOptions{Dialect: golyglot.DialectDuckDB, Schema: &schema},
+)
+for _, use := range analysis.ColumnUses {
+	// References identifies the immediate relation; Upstream follows CTE and
+	// derived-table outputs to physical source columns.
+	fmt.Println(use.Context, use.ExpressionSQL, use.Upstream, use.Complete)
+}
+```
+
+Expression and reference spans are byte offsets into the original SQL. An
+upstream reference retains the location where it is used, even when its
+physical column name differs from a CTE alias. Unknown and ambiguous bindings
+remain explicit; `Complete` is false when a use cannot be fully resolved.
+Implicit `NATURAL JOIN` keys and name-aligned set-operation lineage are not
+yet resolved; uses that depend on them are marked incomplete.
+Unused CTE definitions do not contribute result dependencies. These facts
+are separate from output-value lineage: a filter column is not added to a
+projection merely because it controls which rows survive.
+
+`DiffQuerySemantics` includes these physical dependencies when comparing
+schemas. An unchanged query can therefore report a changed type, nullability,
+or presence for a column used only in a predicate. Its `Complete` flag also
+accounts for unresolved predicate dependencies.
+
+Schema validation uses the same lexical bindings: CTEs see earlier siblings,
+correlated subqueries see legal outer references, and a local alias shadows
+the same alias outside its query block. Invalid references are still reported
+at their original source locations.
 
 `Lineage` resolves a named output column to its source columns.
 `OpenLineageColumnLineage` and the job/run event helpers turn those

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.8 - 2026-09-15
+
+- Add query semantic diffs for canonical SQL, query behavior, output contracts,
+  and schema-dependent input changes.
+- Add an experimental, deterministic DuckDB type-inference oracle with isolated
+  workers, pinned expectations, and reproducible minimized findings.
+- Resolve schema-validation references in their own query scopes, preserving
+  sibling CTEs, correlation, alias shadowing, and JOIN visibility.
+- Expose non-projection `ColumnUses` with use-site spans, immediate references,
+  physical upstream columns, and explicit resolution completeness.
+- Include filter, join, grouping, window, subquery, and set-filter dependencies
+  in semantic schema diffs, including type, presence, and nullability changes.
+- Add time-bounded parser-prefix regressions and fuzz seeds for the malformed
+  data-type and nested IF cases reported upstream in Polyglot.
+
 ## 0.1.0-alpha.7 - 2026-09-04
 
 - Prevent interval units from being reported as column references and guard

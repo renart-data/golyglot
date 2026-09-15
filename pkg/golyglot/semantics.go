@@ -819,7 +819,9 @@ func resolveSemanticIdentifier(value *IdentifierExpr, scope *semanticScope) infe
 		}
 		if qualifier != "" {
 			for _, relation := range current.relations {
-				if semanticRelationMatches(relation, qualifier) && !relation.columnsKnown {
+				if semanticRelationMatches(relation, qualifier) {
+					// A known local alias shadows an outer alias even when its
+					// schema does not contain the requested column.
 					return inferredExpression{dataType: DataType{Kind: DataTypeUnknown}, nullability: nullabilityUnknown, hasColumn: true}
 				}
 			}

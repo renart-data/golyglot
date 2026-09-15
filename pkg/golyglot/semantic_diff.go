@@ -394,6 +394,20 @@ func semanticBehaviorValues(facts QueryBehaviorFacts) []string {
 }
 
 func semanticReferencedInputsComplete(analysis QueryAnalysis, schema *ValidationSchema, dialect Dialect) bool {
+	for _, use := range analysis.ColumnUses {
+		if !use.Complete {
+			return false
+		}
+		for _, reference := range use.Upstream {
+			if reference.SourceName == nil {
+				return false
+			}
+			contract := semanticSchemaContract(schema, semanticInputReference{table: *reference.SourceName, column: reference.Column}, dialect)
+			if !contract.Present || contract.TypeHint == nil {
+				return false
+			}
+		}
+	}
 	for _, projection := range analysis.Projections {
 		for _, reference := range projection.Upstream {
 			if reference.SourceKind != "table" || reference.SourceName == nil {
@@ -484,6 +498,14 @@ type semanticInputReference struct {
 func semanticInputChanges(before, after QueryAnalysis, options QuerySemanticDiffOptions) []QuerySemanticInputChange {
 	referencesByKey := make(map[string]semanticInputReference)
 	collect := func(analysis QueryAnalysis) {
+		for _, use := range analysis.ColumnUses {
+			for _, reference := range use.Upstream {
+				if reference.SourceKind == "table" && reference.SourceName != nil {
+					key := strings.ToLower(*reference.SourceName) + "\x00" + strings.ToLower(reference.Column)
+					referencesByKey[key] = semanticInputReference{table: *reference.SourceName, column: reference.Column}
+				}
+			}
+		}
 		for _, projection := range analysis.Projections {
 			for _, reference := range projection.Upstream {
 				if reference.SourceKind != "table" || reference.SourceName == nil {
