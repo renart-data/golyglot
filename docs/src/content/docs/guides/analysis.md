@@ -109,6 +109,34 @@ at their original source locations.
 `OpenLineageColumnLineage` and the job/run event helpers turn those
 dependencies into JSON-compatible OpenLineage payloads.
 
+## Builtin metadata for editors
+
+`BuiltinFunctionCatalogForDialect` exposes versioned builtin inventories for
+DuckDB, PostgreSQL and ClickHouse without executing SQL:
+
+```go
+catalog, available := golyglot.BuiltinFunctionCatalogForDialect(golyglot.DialectDuckDB)
+if available {
+	for _, function := range catalog.Functions {
+		fmt.Println(function.Name, function.Kind, function.Signatures)
+	}
+}
+```
+
+Each result is an independent copy. Unsupported dialects return `false` rather
+than borrowing another vendor's functions. The catalog records the observed
+engine version; installed extensions and user-defined functions are separate.
+
+The inventory also includes verified grammar-level forms absent from engine
+catalogs: DuckDB `COALESCE`/`NULLIF` and PostgreSQL
+`COALESCE`/`NULLIF`/`GREATEST`/`LEAST`. These entries include a separate source
+link and leave the argument-dependent result type unknown.
+
+These are **catalog declarations**, not inferred result types for the current
+query. Polymorphic types remain placeholders, file-dependent table schemas stay
+unknown, and ClickHouse syntax text is not promoted to a return type. Use
+`AnalyzeQuery` for inference and `FunctionCatalogSpec` for supplied UDF rules.
+
 ## Lambdas and aliases
 
 Higher-order functions such as `TRANSFORM(values, x -> x + quantity)` bind

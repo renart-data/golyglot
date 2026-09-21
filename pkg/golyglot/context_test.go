@@ -1,6 +1,47 @@
 package golyglot
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestSyntacticContextInsideNestedCallAfterCTE(t *testing.T) {
+	for _, dialect := range []Dialect{DialectDuckDB, DialectPostgreSQL, DialectClickHouse} {
+		for _, newline := range []string{"\n", "\r\n"} {
+			for _, prefix := range []string{"", "ro"} {
+				sql := "WITH sample AS (SELECT 1 AS cost, 2 AS rounding)" + newline + "SELECT round(round(" + prefix
+				t.Run(string(dialect)+strings.NewReplacer("\r", "CR", "\n", "LF").Replace(newline)+prefix, func(t *testing.T) {
+					context, err := SyntacticContextAt(sql, len(sql), dialect)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !containsExpectedSyntax(context.Expected, ExpectedSyntax{Kind: ExpectedExpression}) {
+						t.Fatalf("nested call argument expects an expression, got %#v", context)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestSampleCTEIsAnUnreservedIdentifier(t *testing.T) {
+	const sql = "WITH sample AS (SELECT 1 AS cost, 2 AS rounding) SELECT round(round(rounding)) FROM sample"
+	for _, dialect := range []Dialect{DialectDuckDB, DialectPostgreSQL, DialectClickHouse} {
+		t.Run(string(dialect), func(t *testing.T) {
+			parsed, err := ParseStrict(sql, dialect)
+			if err != nil {
+				t.Fatal(err)
+			}
+			query := parsed.Statements[0].Node.(*SelectStmt)
+			if len(query.With) != 1 || query.With[0].Name.Text != "sample" {
+				t.Fatalf("lost SAMPLE CTE: %#v", query.With)
+			}
+			if _, err := ParseStrict("WITH SELECT AS (SELECT 1) SELECT 1", dialect); err == nil {
+				t.Fatal("genuinely reserved SELECT must not become an unquoted CTE name")
+			}
+		})
+	}
+}
 
 func TestSyntacticContextAtIncompleteSQL(t *testing.T) {
 	tests := []struct {

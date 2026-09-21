@@ -1731,7 +1731,7 @@ func (p *parser) missingSelectItem() SelectItem {
 func (p *parser) parseFromClause() []TableExpr {
 	var tables []TableExpr
 	for {
-		if p.isClauseBoundary() {
+		if p.isClauseBoundary() && !p.isUnreservedIdentifierKeyword(p.peek()) {
 			p.reportExpectedTable("after FROM")
 			break
 		}
@@ -5260,7 +5260,7 @@ func (p *parser) parseIdentifier(allowKeyword bool) (Identifier, bool) {
 			return Identifier{Text: tok.Text + next.Text, Span: Span{Start: tok.Span.Start, End: next.Span.End}}, true
 		}
 	}
-	if tok.Kind != TokenIdentifier && tok.Kind != TokenQuotedIdentifier && !(tok.Kind == TokenKeyword && (allowKeyword || !p.isStructuralKeyword(tok) || tok.IsWord("WINDOW") || (p.options.Dialect == DialectBigQuery && (tok.IsWord("AT") || tok.IsWord("SAMPLE"))) || (p.options.Dialect == DialectRedshift && tok.IsWord("EXCLUDE")))) {
+	if tok.Kind != TokenIdentifier && tok.Kind != TokenQuotedIdentifier && !(tok.Kind == TokenKeyword && (allowKeyword || !p.isStructuralKeyword(tok) || p.isUnreservedIdentifierKeyword(tok))) {
 		return Identifier{}, false
 	}
 	p.advance()
@@ -5272,6 +5272,25 @@ func (p *parser) parseIdentifier(allowKeyword bool) (Identifier, bool) {
 		}
 	}
 	return identifier, true
+}
+
+// Structural words belong to the shared grammar, but are not necessarily
+// reserved identifiers in every dialect. In particular SAMPLE can name a CTE
+// even though it also starts a table-sampling clause in some engines.
+func (p *parser) isUnreservedIdentifierKeyword(tok Token) bool {
+	switch {
+	case tok.IsWord("WINDOW"):
+		return true
+	case tok.IsWord("SAMPLE"):
+		return p.options.Dialect == DialectBigQuery || p.options.Dialect == DialectDuckDB ||
+			p.options.Dialect == DialectPostgreSQL || p.options.Dialect == DialectClickHouse
+	case tok.IsWord("AT"):
+		return p.options.Dialect == DialectBigQuery
+	case tok.IsWord("EXCLUDE"):
+		return p.options.Dialect == DialectRedshift
+	default:
+		return false
+	}
 }
 
 func identifierText(tok Token) string {
