@@ -4936,7 +4936,7 @@ func (p *parser) parseCallArguments() []Expr {
 			p.advance()
 			continue
 		}
-		args = append(args, p.parseExpressionAlias(p.parseExpressionWithSet()))
+		args = append(args, p.parseFunctionArgument())
 		if !p.matchText(",") {
 			break
 		}
@@ -5057,7 +5057,7 @@ func (p *parser) parseFunctionArguments() ([]Expr, []OrderItem, Expr, string, bo
 			p.advance()
 			continue
 		}
-		args = append(args, p.parseExpressionAlias(p.parseExpressionWithSet()))
+		args = append(args, p.parseFunctionArgument())
 		if p.peek().IsWord("ORDER") {
 			p.advance()
 			p.expectWord("BY", "after ORDER in function call")

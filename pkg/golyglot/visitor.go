@@ -165,6 +165,8 @@ func Transform(root Node, transform func(Node) Node) Node {
 			value.Left = transformExprChild(value.Left, visit)
 			value.Right = transformExprChild(value.Right, visit)
 			value.Escape = transformExprChild(value.Escape, visit)
+		case *LambdaExpr:
+			value.Body = transformExprChild(value.Body, visit)
 		case *InExpr:
 			value.Value = transformExprChild(value.Value, visit)
 			for i := range value.Items {
@@ -424,6 +426,8 @@ func nodeChildren(node Node) []Node {
 		appendExpr(value.Left)
 		appendExpr(value.Right)
 		appendExpr(value.Escape)
+	case *LambdaExpr:
+		appendExpr(value.Body)
 	case *InExpr:
 		appendExpr(value.Value)
 		for i := range value.Items {

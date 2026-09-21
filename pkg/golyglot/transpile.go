@@ -61,6 +61,12 @@ func TranspileWithOptions(sql string, fromDialect, toDialect Dialect, options Tr
 			normalizeBigQueryPrestoUnnestAliases(result.Statements[i].Node)
 		}
 		transformer.node(result.Statements[i].Node)
+		if toDialect == DialectDuckDB && (fromDialect == DialectAthena || fromDialect == DialectTrino || fromDialect == DialectPresto) {
+			result.Statements[i].Node, err = normalizeTrinoDuckDBFunctions(result.Statements[i].Node)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if toDialect == DialectClickHouse {
 			normalizeClickHouseJoinModifiers(result.Statements[i].Node)
 		}

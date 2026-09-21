@@ -11,6 +11,7 @@ The alpha release currently exposes:
 - Typed AST nodes with source spans
 - Fluent expressions, SELECT queries, CTEs, set operations, and common DML builders
 - Syntax, semantic, and schema-aware validation
+- Per-call function/UDF catalogs with typed overloads and function kinds
 - `AnalyzeQuery` facts plus schema-aware output type and nullability inference
 - `ParseDataType` for normalized scalar and nested SQL data types
 - `Lineage`, source-table discovery, and OpenLineage column/job/run payloads

@@ -53,3 +53,10 @@ checks all 14,091 cases. Reproducible Go/Polyglot comparisons and custom
 workloads are documented in [benchmarks/README.md](benchmarks/README.md). The
 Astro/Starlight docs and Monaco/WASM demo live under `docs/`; use
 `make docs-build`.
+
+For execution-based Athena/Trino-to-DuckDB regressions, install the DuckDB
+CLI and run `GOLYGLOT_DUCKDB_ORACLE=1 go test ./pkg/golyglot`. The full fixture
+harness explicitly corrects two old NULL-dropping Presto expectations;
+the original fixture snapshot remains unchanged. See the
+[transpilation guide](docs/src/content/docs/guides/transpilation.md) for
+supported semantics and limitations.

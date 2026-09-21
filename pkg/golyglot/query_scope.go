@@ -6,29 +6,32 @@ import "strings"
 // A query block never resolves against a flattened list of its descendants.
 // Types remain the responsibility of the existing semantic inference pass.
 type queryBindings struct {
-	options AnalyzeQueryOptions
-	scopes  []*queryScope
-	queries map[*SelectStmt]*queryScope
+	options     AnalyzeQueryOptions
+	scopes      []*queryScope
+	queries     map[*SelectStmt]*queryScope
+	identifiers map[Span]Identifier
 }
 
 type queryScope struct {
-	query      *SelectStmt
-	parent     *queryScope
-	ctes       map[string]*scopeRelation
-	relations  []*scopeRelation
-	outputs    []scopeOutput
-	complete   bool
-	bindings   *queryBindings
-	joins      map[Span]*queryScope
-	using      map[Span][]boundReference
-	usingOrder []Span
-	coalesced  map[string][]*scopeRelation
+	query           *SelectStmt
+	parent          *queryScope
+	ctes            map[string]*scopeRelation
+	relations       []*scopeRelation
+	outputs         []scopeOutput
+	leftOutputCount int
+	complete        bool
+	bindings        *queryBindings
+	joins           map[Span]*queryScope
+	using           map[Span][]boundReference
+	usingOrder      []Span
+	coalesced       map[string][]*scopeRelation
 }
 
 type scopeRelation struct {
 	name, alias, kind string
 	span              Span
 	columns           []string
+	columnQuotes      []bool
 	known             bool
 	source            *queryScope
 	arguments         []Expr
@@ -37,6 +40,7 @@ type scopeRelation struct {
 
 type scopeOutput struct {
 	name       string
+	quoted     bool
 	expression Expr
 	owner      *queryScope
 	relation   *scopeRelation
@@ -53,7 +57,13 @@ type boundReference struct {
 }
 
 func bindQuery(query *SelectStmt, options AnalyzeQueryOptions) *queryScope {
-	bindings := &queryBindings{options: options, queries: make(map[*SelectStmt]*queryScope)}
+	bindings := &queryBindings{options: options, queries: make(map[*SelectStmt]*queryScope), identifiers: make(map[Span]Identifier)}
+	Walk(query, func(node Node) VisitAction {
+		if id, ok := node.(*IdentifierExpr); ok && len(id.Parts) > 0 {
+			bindings.identifiers[id.SourceSpan()] = id.Parts[len(id.Parts)-1]
+		}
+		return VisitChildren
+	})
 	return bindings.build(query, nil, nil)
 }
 
@@ -98,6 +108,7 @@ func (b *queryBindings) build(query *SelectStmt, parent *queryScope, ctes map[st
 			if cte := scope.ctes[strings.ToLower(relation.name)]; len(value.Parts) == 1 && cte != nil {
 				relation.kind, relation.source, relation.known = "cte", cte.source, cte.known
 				relation.columns = append([]string(nil), cte.columns...)
+				relation.columnQuotes = append([]bool(nil), cte.columnQuotes...)
 			} else if table, ok := findSchemaTableValue(b.options.Schema, relation.name); ok {
 				relation.known = true
 				for _, column := range table.Columns {
@@ -191,7 +202,16 @@ func (b *queryBindings) build(query *SelectStmt, parent *queryScope, ctes map[st
 	} else {
 		scope.collectOutputs()
 	}
-	b.build(query.SetRight, parent, scope.ctes)
+	scope.leftOutputCount = len(scope.outputs)
+	right := b.build(query.SetRight, parent, scope.ctes)
+	if setByName(query) && right != nil {
+		scope.complete = scope.complete && right.complete
+		for _, output := range right.outputs {
+			if scope.outputIndex(output) < 0 {
+				scope.outputs = append(scope.outputs, output)
+			}
+		}
+	}
 	// Register scalar/EXISTS/IN subqueries without walking into another block.
 	Walk(query, func(node Node) VisitAction {
 		if child, ok := node.(*SelectStmt); ok && child != query {
@@ -206,9 +226,11 @@ func (b *queryBindings) build(query *SelectStmt, parent *queryScope, ctes map[st
 func (relation *scopeRelation) setOutputColumns(aliases []Identifier) {
 	if relation.source != nil {
 		relation.columns = nil
+		relation.columnQuotes = nil
 		relation.known = relation.source.complete
 		for _, output := range relation.source.outputs {
 			relation.columns = append(relation.columns, output.name)
+			relation.columnQuotes = append(relation.columnQuotes, output.quoted)
 		}
 	}
 	for index, alias := range aliases {
@@ -217,6 +239,10 @@ func (relation *scopeRelation) setOutputColumns(aliases []Identifier) {
 		} else {
 			relation.columns = append(relation.columns, alias.Text)
 		}
+		for len(relation.columnQuotes) <= index {
+			relation.columnQuotes = append(relation.columnQuotes, false)
+		}
+		relation.columnQuotes[index] = alias.Quoted
 	}
 }
 
@@ -224,7 +250,7 @@ func (scope *queryScope) collectOutputs() {
 	for _, projection := range scope.query.Projections {
 		if !isStarExpression(projection.Expr) {
 			name := projectionName(projection)
-			scope.outputs = append(scope.outputs, scopeOutput{name: name, expression: projection.Expr, owner: scope})
+			scope.outputs = append(scope.outputs, scopeOutput{name: name, quoted: projectionQuoted(projection), expression: projection.Expr, owner: scope})
 			scope.complete = scope.complete && name != ""
 			continue
 		}
@@ -236,7 +262,7 @@ func (scope *queryScope) collectOutputs() {
 			}
 			matched = true
 			scope.complete = scope.complete && relation.known
-			for _, name := range relation.columns {
+			for columnIndex, name := range relation.columns {
 				excluded := false
 				for _, expression := range projection.Except {
 					excluded = excluded || strings.EqualFold(expressionOutputName(expression), name)
@@ -245,6 +271,7 @@ func (scope *queryScope) collectOutputs() {
 					continue
 				}
 				output := scopeOutput{name: name, owner: scope, relation: relation, column: name}
+				output.quoted = columnIndex < len(relation.columnQuotes) && relation.columnQuotes[columnIndex]
 				for _, replacement := range projection.Replace {
 					if strings.EqualFold(projectionName(replacement), name) {
 						output.expression, output.relation = replacement.Expr, nil
@@ -287,8 +314,8 @@ func (scope *queryScope) resolve(reference ColumnReference) boundReference {
 				unknown = append(unknown, relation)
 				continue
 			}
-			for _, column := range relation.columns {
-				if strings.EqualFold(column, reference.Column) {
+			for index := range relation.columns {
+				if relation.matchesColumn(index, reference) {
 					matches = append(matches, relation)
 				}
 			}
@@ -351,38 +378,4 @@ func (scope *queryScope) atReference(reference ColumnReference) *queryScope {
 		}
 	}
 	return scope
-}
-
-// walkScopeColumns prunes nested queries and syntax-only identifiers (CAST
-// types and interval units). It never changes the generic public AST visitor.
-func walkScopeColumns(node Node, visit func(ColumnReference)) {
-	Walk(node, func(child Node) VisitAction {
-		switch value := child.(type) {
-		case *SelectStmt:
-			if child != node {
-				return SkipChildren
-			}
-		case *CastExpr:
-			walkScopeColumns(value.Value, visit)
-			return SkipChildren
-		case *IntervalExpr:
-			walkScopeColumns(value.Value, visit)
-			return SkipChildren
-		case *IdentifierExpr:
-			if len(value.Parts) == 0 || value.Parts[len(value.Parts)-1].Text == "*" {
-				return SkipChildren
-			}
-			reference := ColumnReference{Column: value.Parts[len(value.Parts)-1].Text, Span: value.SourceSpan()}
-			if len(value.Parts) > 1 {
-				reference.Table = identifiersText(value.Parts[:len(value.Parts)-1])
-			} else if !value.Parts[0].Quoted {
-				switch strings.ToUpper(reference.Column) {
-				case "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "LOCALTIME", "LOCALTIMESTAMP", "CURRENT_USER":
-					return SkipChildren
-				}
-			}
-			visit(reference)
-		}
-		return VisitChildren
-	})
 }

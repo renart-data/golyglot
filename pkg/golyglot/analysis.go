@@ -8,8 +8,10 @@ import (
 // AnalyzeQueryOptions controls the dialect and optional schema used for
 // compact query facts.
 type AnalyzeQueryOptions struct {
-	Dialect Dialect           `json:"dialect,omitempty"`
-	Schema  *ValidationSchema `json:"schema,omitempty"`
+	Dialect         Dialect              `json:"dialect,omitempty"`
+	Schema          *ValidationSchema    `json:"schema,omitempty"`
+	FunctionCatalog *FunctionCatalogSpec `json:"functionCatalog,omitempty"`
+	catalog         *compiledFunctionCatalog
 }
 
 // QueryAnalysis is intentionally compact: it summarizes query shape,
@@ -117,6 +119,11 @@ func AnalyzeQuery(sql string, options AnalyzeQueryOptions) (QueryAnalysis, error
 	if strings.TrimSpace(string(options.Dialect)) == "" {
 		options.Dialect = DialectGeneric
 	}
+	var err error
+	options.catalog, err = compileFunctionCatalog(options.FunctionCatalog, options.Dialect)
+	if err != nil {
+		return QueryAnalysis{}, err
+	}
 	result, err := ParseStrict(sql, options.Dialect)
 	if err != nil {
 		return QueryAnalysis{}, err
@@ -153,6 +160,7 @@ func analyzeSelectFacts(selectStmt *SelectStmt, options AnalyzeQueryOptions) Que
 		result.CTEFacts = append(result.CTEFacts, fact)
 	}
 
+	bindings := bindQuery(selectStmt, options)
 	result.Projections = projectionFacts(selectStmt, options.Schema, options.Dialect)
 	for index := range result.Projections {
 		if index >= len(semantics.projections) {
@@ -164,6 +172,29 @@ func analyzeSelectFacts(selectStmt *SelectStmt, options AnalyzeQueryOptions) Que
 			result.Projections[index].TypeHint = &value
 		}
 		result.Projections[index].Nullability = inferred.nullability
+		result.Projections[index].Upstream = nil
+		for _, ref := range bindings.references(selectStmt.Projections[index].Expr, false) {
+			result.Projections[index].Upstream = append(result.Projections[index].Upstream, analysisBoundFacts(ref, make(map[*scopeRelation]bool))...)
+		}
+		if function := result.Projections[index].TransformFunction; function != nil {
+			function.ColumnArgs = result.Projections[index].Upstream
+		}
+	}
+	if selectStmt.SetRight != nil {
+		result.Projections = nil
+		for index, column := range semantics.output {
+			name := column.name
+			fact := ProjectionFact{Index: index, Name: &name, TransformKind: "set_operation", Nullability: column.nullability}
+			if column.dataType.Known() {
+				hint := column.dataType.SQL()
+				fact.TypeHint = &hint
+			}
+			refs, _ := bindings.outputBindings(index)
+			for _, ref := range refs {
+				fact.Upstream = append(fact.Upstream, analysisBoundFacts(ref, make(map[*scopeRelation]bool))...)
+			}
+			result.Projections = append(result.Projections, fact)
+		}
 	}
 	result.Relations = relationFacts(selectStmt, options.Schema)
 	for _, relation := range result.Relations {
@@ -192,8 +223,28 @@ func analyzeSelectFacts(selectStmt *SelectStmt, options AnalyzeQueryOptions) Que
 		result.OutputColumns = append(result.OutputColumns, fact)
 	}
 	collectSetFacts(selectStmt, &result, options.Dialect)
-	result.ColumnUses = queryColumnUses(bindQuery(selectStmt, options))
+	result.ColumnUses = queryColumnUses(bindings)
 	return result
+}
+
+func analysisBoundFacts(binding boundReference, visiting map[*scopeRelation]bool) []ColumnReferenceFact {
+	if relation := binding.relation; relation != nil && relation.kind == "table_function" {
+		if visiting[relation] {
+			binding.relation = nil
+			binding.status = "unknown"
+			return []ColumnReferenceFact{binding.fact()}
+		}
+		visiting[relation] = true
+		defer delete(visiting, relation)
+		var facts []ColumnReferenceFact
+		for _, argument := range relation.arguments {
+			for _, child := range relation.owner.references(argument, false) {
+				facts = append(facts, analysisBoundFacts(child, visiting)...)
+			}
+		}
+		return facts
+	}
+	return []ColumnReferenceFact{binding.fact()}
 }
 
 func queryShape(selectStmt *SelectStmt) string {

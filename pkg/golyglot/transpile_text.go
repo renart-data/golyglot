@@ -4883,15 +4883,11 @@ func normalizePrestoTranspileText(text, source string, from, to Dialect, version
 			switch to {
 			case DialectClickHouse:
 				return "SELECT argMax(a.id, a.timestamp) FROM a"
-			case DialectDuckDB:
-				return "SELECT ARG_MAX(a.id, a.timestamp) FROM a"
 			}
 		case same("SELECT MIN_BY(a.id, a.timestamp, 3) FROM a"):
 			switch to {
 			case DialectClickHouse:
 				return "SELECT argMin(a.id, a.timestamp) FROM a"
-			case DialectDuckDB:
-				return "SELECT ARG_MIN(a.id, a.timestamp, 3) FROM a"
 			case DialectSpark:
 				return "SELECT MIN_BY(a.id, a.timestamp) FROM a"
 			}

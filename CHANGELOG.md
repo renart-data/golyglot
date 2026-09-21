@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.9 - 2026-09-21
+
+- Resolve higher-order lambda parameters and supported same-SELECT aliases
+  lexically in schema validation, type inference, and column dependencies;
+  parse Snowflake's typed lambda form without losing its body.
+- Align set-operation projection facts with final output types. Resolve
+  `UNION BY NAME` by dialect-aware names, including NULL padding, reordered
+  columns, CTE scopes, and public output/lineage APIs.
+- Add semantic grouping, aggregate-placement, and window-placement checks
+  with source spans; syntax-only validation remains unchanged.
+- Add per-call function/UDF catalogs with overloads, variadic signatures,
+  function kinds, case policies, argument checks, and return-type inference.
+- Preserve Athena/Trino/Presto semantics when translating `MAX_BY`, `MIN_BY`,
+  `REGEXP_EXTRACT`, `REGEXP_REPLACE`, and supported `TO_ISO8601` inputs to
+  DuckDB. Reject unsupported replacements or precision/timezone cases rather
+  than silently generating a different result.
+- Add opt-in DuckDB execution regressions (`GOLYGLOT_DUCKDB_ORACLE=1`). Two
+  pinned Presto-to-DuckDB fixture expectations now have explicit, tested
+  NULL-preserving corrections; the upstream fixture snapshot is unchanged.
+
 ## 0.1.0-alpha.8 - 2026-09-15
 
 - Add query semantic diffs for canonical SQL, query behavior, output contracts,

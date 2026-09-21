@@ -2910,6 +2910,23 @@ func (g generator) expr(expression Expr, parentPrecedence int) (string, error) {
 		}
 	case *LiteralExpr:
 		text = expression.Raw
+	case *LambdaExpr:
+		parameters := make([]string, len(expression.Parameters))
+		for index, parameter := range expression.Parameters {
+			parameters[index] = generateIdentifiers([]Identifier{parameter.Name})
+			if parameter.Type != "" {
+				parameters[index] += " " + parameter.Type
+			}
+		}
+		left := strings.Join(parameters, ", ")
+		if len(parameters) > 1 {
+			left = "(" + left + ")"
+		}
+		body, err := g.expr(expression.Body, 0)
+		if err != nil {
+			return "", err
+		}
+		text = left + " -> " + body
 	case *StarExpr:
 		text = "*"
 	case *UnaryExpr:

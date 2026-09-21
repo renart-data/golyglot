@@ -13,6 +13,7 @@ const (
 
 type semanticColumn struct {
 	name        string
+	quoted      bool
 	dataType    DataType
 	nullability string
 }
@@ -32,6 +33,9 @@ type semanticScope struct {
 	ctes      map[string][]semanticColumn
 	dialect   Dialect
 	schema    *ValidationSchema
+	aliases   map[string]inferredExpression
+	locals    map[string]inferredExpression
+	catalog   *compiledFunctionCatalog
 }
 
 type inferredExpression struct {
@@ -63,7 +67,8 @@ func analyzeSelectSemantics(query *SelectStmt, options AnalyzeQueryOptions, pare
 		result.typesComplete = false
 		return result
 	}
-	scope := &semanticScope{parent: parent, ctes: make(map[string][]semanticColumn), dialect: options.Dialect, schema: options.Schema}
+	scope := &semanticScope{parent: parent, ctes: make(map[string][]semanticColumn), dialect: options.Dialect, schema: options.Schema, aliases: make(map[string]inferredExpression)}
+	scope.catalog = options.catalog
 	if scope.schema == nil && parent != nil {
 		scope.schema = parent.schema
 	}
@@ -79,6 +84,7 @@ func analyzeSelectSemantics(query *SelectStmt, options AnalyzeQueryOptions, pare
 			for index := range columns {
 				if index < len(cte.Columns) {
 					columns[index].name = cte.Columns[index].Text
+					columns[index].quoted = cte.Columns[index].Quoted
 				}
 			}
 		}
@@ -89,6 +95,9 @@ func analyzeSelectSemantics(query *SelectStmt, options AnalyzeQueryOptions, pare
 
 	for index, projection := range query.Projections {
 		inferred := inferSemanticExpression(projection.Expr, scope, &result.issues)
+		if projection.Alias != nil && supportsLateralAliases(scope.dialect) {
+			scope.aliases[identifierKey(*projection.Alias, scope.dialect)] = inferred
+		}
 		result.projections = append(result.projections, inferred)
 		if isStarExpression(projection.Expr) {
 			columns, complete := semanticStarColumns(projection, scope)
@@ -98,7 +107,7 @@ func analyzeSelectSemantics(query *SelectStmt, options AnalyzeQueryOptions, pare
 				result.typesComplete = false
 			}
 			for _, column := range columns {
-				result.output = appendSemanticColumn(result.output, column)
+				result.output = append(result.output, column)
 				if !column.dataType.Known() {
 					result.typesComplete = false
 				}
@@ -109,8 +118,8 @@ func analyzeSelectSemantics(query *SelectStmt, options AnalyzeQueryOptions, pare
 		if name == "" {
 			result.namesComplete = false
 		}
-		column := semanticColumn{name: name, dataType: inferred.dataType, nullability: normalizedNullability(inferred.nullability)}
-		result.output = appendSemanticColumn(result.output, column)
+		column := semanticColumn{name: name, quoted: projectionQuoted(projection), dataType: inferred.dataType, nullability: normalizedNullability(inferred.nullability)}
+		result.output = append(result.output, column)
 		if !column.dataType.Known() {
 			result.typesComplete = false
 		}
@@ -119,19 +128,39 @@ func analyzeSelectSemantics(query *SelectStmt, options AnalyzeQueryOptions, pare
 		result.namesComplete = false
 		result.typesComplete = false
 	}
+	// Predicate and ordering calls need the same typed scope as projections.
+	for _, expression := range append(append([]Expr{query.Where, query.Having, query.Qualify}, query.GroupBy...), query.Limit, query.Offset) {
+		inferSemanticExpression(expression, scope, &result.issues)
+	}
+	for _, order := range query.OrderBy {
+		inferSemanticExpression(order.Expr, scope, &result.issues)
+	}
+	for _, table := range query.From {
+		for _, join := range table.Joins {
+			inferSemanticExpression(join.Condition, scope, &result.issues)
+		}
+	}
 
 	if query.SetRight != nil {
-		leftQuery := query
+		// Branches inherit the WITH namespace, but not each other's FROM
+		// relations or SELECT aliases.
+		branchParent := &semanticScope{parent: parent, ctes: scope.ctes, dialect: scope.dialect, schema: scope.schema, catalog: scope.catalog}
+		left := result
 		if query.SetLeft != nil {
-			leftQuery = query.SetLeft
+			left = analyzeSelectSemantics(query.SetLeft, options, branchParent)
+			result.issues = append(result.issues, left.issues...)
 		}
-		left := analyzeSelectSemanticsWithoutSet(leftQuery, options, parent)
-		right := analyzeSelectSemantics(query.SetRight, options, parent)
-		result.issues = append(result.issues, left.issues...)
+		right := analyzeSelectSemantics(query.SetRight, options, branchParent)
 		result.issues = append(result.issues, right.issues...)
 		result.output = coerceSetOutput(left.output, right.output, options.Dialect)
-		result.namesComplete = left.namesComplete
+		result.namesComplete = left.namesComplete && right.namesComplete
 		result.typesComplete = left.typesComplete && right.typesComplete && len(left.output) == len(right.output)
+		if setByName(query) {
+			var unique bool
+			result.output, unique = coerceNamedSetOutput(left.output, right.output, options.Dialect)
+			result.namesComplete = result.namesComplete && unique
+			result.typesComplete = left.typesComplete && right.typesComplete && result.namesComplete
+		}
 	}
 	return result
 }
@@ -421,7 +450,7 @@ func semanticStarColumns(projection SelectItem, scope *semanticScope) ([]semanti
 			if relation.nullable {
 				column.nullability = nullabilityNullable
 			}
-			columns = appendSemanticColumn(columns, column)
+			columns = appendSemanticColumn(columns, column, scope.dialect)
 		}
 	}
 	for _, replacement := range projection.Replace {
@@ -430,7 +459,7 @@ func semanticStarColumns(projection SelectItem, scope *semanticScope) ([]semanti
 			continue
 		}
 		inferred := inferSemanticExpression(replacement.Expr, scope, nil)
-		column := semanticColumn{name: name, dataType: inferred.dataType, nullability: inferred.nullability}
+		column := semanticColumn{name: name, quoted: projectionQuoted(replacement), dataType: inferred.dataType, nullability: inferred.nullability}
 		replaced := false
 		for index := range columns {
 			if strings.EqualFold(columns[index].name, name) {
@@ -474,6 +503,11 @@ func inferSemanticExpression(expression Expr, scope *semanticScope, issues *[]se
 	case *ParenthesizedExpr:
 		return inferSemanticExpression(value.Expr, scope, issues)
 	case *WindowedExpr:
+		if fn, ok := value.Expr.(*FunctionCallExpr); ok {
+			copy := *fn
+			copy.Over = &value.Over
+			return inferSemanticFunction(&copy, scope, issues)
+		}
 		return inferSemanticExpression(value.Expr, scope, issues)
 	case *IdentifierExpr:
 		return resolveSemanticIdentifier(value, scope)
@@ -500,6 +534,15 @@ func inferSemanticExpression(expression Expr, scope *semanticScope, issues *[]se
 			other := inferSemanticExpression(item, scope, issues)
 			base.nullability = combineNullability(base.nullability, other.nullability)
 		}
+		if value.Query != nil {
+			child := analyzeSelectSemantics(value.Query, AnalyzeQueryOptions{Dialect: scope.dialect, Schema: scope.schema, catalog: scope.catalog}, scope)
+			if issues != nil {
+				*issues = append(*issues, child.issues...)
+			}
+			if len(child.output) > 0 {
+				base.nullability = combineNullability(base.nullability, child.output[0].nullability)
+			}
+		}
 		base.dataType = DataType{Kind: DataTypeBoolean}
 		base.integerLiteral = nil
 		return base
@@ -508,7 +551,15 @@ func inferSemanticExpression(expression Expr, scope *semanticScope, issues *[]se
 		low := inferSemanticExpression(value.Low, scope, issues)
 		high := inferSemanticExpression(value.High, scope, issues)
 		return inferredExpression{dataType: DataType{Kind: DataTypeBoolean}, nullability: combineNullability(base.nullability, low.nullability, high.nullability)}
-	case *IsExpr, *ExistsExpr:
+	case *ExistsExpr:
+		child := analyzeSelectSemantics(value.Query, AnalyzeQueryOptions{Dialect: scope.dialect, Schema: scope.schema, catalog: scope.catalog}, scope)
+		if issues != nil {
+			*issues = append(*issues, child.issues...)
+		}
+		return inferredExpression{dataType: DataType{Kind: DataTypeBoolean}, nullability: nullabilityNonNull}
+	case *IsExpr:
+		inferSemanticExpression(value.Value, scope, issues)
+		inferSemanticExpression(value.Right, scope, issues)
 		return inferredExpression{dataType: DataType{Kind: DataTypeBoolean}, nullability: nullabilityNonNull}
 	case *FunctionCallExpr:
 		return inferSemanticFunction(value, scope, issues)
@@ -531,9 +582,11 @@ func inferSemanticExpression(expression Expr, scope *semanticScope, issues *[]se
 		}
 		return inner
 	case *CaseExpr:
+		inferSemanticExpression(value.Operand, scope, issues)
 		result := unknown
 		first := true
 		for _, branch := range value.Whens {
+			inferSemanticExpression(branch.Condition, scope, issues)
 			candidate := inferSemanticExpression(branch.Result, scope, issues)
 			if first {
 				result = candidate
@@ -558,7 +611,7 @@ func inferSemanticExpression(expression Expr, scope *semanticScope, issues *[]se
 	case *IntervalExpr:
 		return inferredExpression{dataType: DataType{Kind: DataTypeInterval}, nullability: inferSemanticExpression(value.Value, scope, issues).nullability}
 	case *SubqueryExpr:
-		child := analyzeSelectSemantics(value.Query, AnalyzeQueryOptions{Dialect: scope.dialect, Schema: scope.schema}, scope)
+		child := analyzeSelectSemantics(value.Query, AnalyzeQueryOptions{Dialect: scope.dialect, Schema: scope.schema, catalog: scope.catalog}, scope)
 		if issues != nil {
 			*issues = append(*issues, child.issues...)
 		}
@@ -655,10 +708,56 @@ func inferSemanticBinary(value *BinaryExpr, scope *semanticScope, issues *[]sema
 }
 
 func inferSemanticFunction(value *FunctionCallExpr, scope *semanticScope, issues *[]semanticIssue) inferredExpression {
+	inferSemanticExpression(value.Filter, scope, issues)
+	inferSemanticExpression(value.Having, scope, issues)
+	for _, order := range value.OrderBy {
+		inferSemanticExpression(order.Expr, scope, issues)
+	}
+	for _, order := range value.WithinGroup {
+		inferSemanticExpression(order.Expr, scope, issues)
+	}
+	if value.Over != nil {
+		for _, partition := range value.Over.PartitionBy {
+			inferSemanticExpression(partition, scope, issues)
+		}
+		for _, order := range value.Over.OrderBy {
+			inferSemanticExpression(order.Expr, scope, issues)
+		}
+	}
 	name := strings.ToUpper(lastIdentifier(identifiersText(value.Name)))
 	args := make([]inferredExpression, 0, len(value.Args))
-	for _, argument := range value.Args {
-		args = append(args, inferSemanticExpression(argument, scope, issues))
+	for index, argument := range value.Args {
+		parameters, body, lambda := lambdaParts(argument)
+		if lambda && lambdaArgument(value, index) {
+			child := *scope
+			child.locals = make(map[string]inferredExpression)
+			for name, local := range scope.locals {
+				child.locals[name] = local
+			}
+			for parameterIndex, parameter := range parameters {
+				local := inferredExpression{dataType: DataType{Kind: DataTypeUnknown}, nullability: nullabilityUnknown}
+				arrayIndex := parameterIndex
+				if index == 0 {
+					arrayIndex++
+				}
+				if arrayIndex < len(value.Args) {
+					array := inferSemanticExpression(value.Args[arrayIndex], scope, issues)
+					if array.dataType.Element != nil {
+						local.dataType = *array.dataType.Element
+					}
+				}
+				child.locals[identifierKey(parameter, scope.dialect)] = local
+				if lambda, ok := argument.(*LambdaExpr); ok && parameterIndex < len(lambda.Parameters) {
+					if declared, err := ParseDataType(lambda.Parameters[parameterIndex].Type, scope.dialect); err == nil {
+						local.dataType = declared
+						child.locals[identifierKey(parameter, scope.dialect)] = local
+					}
+				}
+			}
+			args = append(args, inferSemanticExpression(body, &child, issues))
+		} else {
+			args = append(args, inferSemanticExpression(argument, scope, issues))
+		}
 	}
 	arg := func(index int) inferredExpression {
 		if index >= 0 && index < len(args) {
@@ -666,10 +765,22 @@ func inferSemanticFunction(value *FunctionCallExpr, scope *semanticScope, issues
 		}
 		return inferredExpression{dataType: DataType{Kind: DataTypeUnknown}, nullability: nullabilityUnknown}
 	}
+	if inferred, handled := scope.catalog.infer(value, args, issues); handled {
+		return inferred
+	}
 	known := func(kind DataTypeKind, nullable string) inferredExpression {
 		return inferredExpression{dataType: DataType{Kind: kind}, nullability: nullable}
 	}
 	switch name {
+	case "TRANSFORM", "LIST_TRANSFORM", "LIST_APPLY", "ARRAY_APPLY", "ARRAY_TRANSFORM", "ZIP_WITH", "ARRAYMAP":
+		index := len(args) - 1
+		if name == "ARRAYMAP" {
+			index = 0
+		}
+		element := arg(index).dataType
+		return inferredExpression{dataType: DataType{Kind: DataTypeArray, Element: &element}, nullability: arg(0).nullability}
+	case "FILTER", "LIST_FILTER", "ARRAY_FILTER":
+		return arg(0)
 	case "COUNT", "COUNT_IF", "ROW_NUMBER", "RANK", "DENSE_RANK", "NTILE":
 		return known(DataTypeBigInt, nullabilityNonNull)
 	case "SUM", "SUM_IF":
@@ -755,7 +866,7 @@ func inferSemanticFunction(value *FunctionCallExpr, scope *semanticScope, issues
 		return result
 	case "IF", "IIF", "IFF":
 		return coerceSemanticExpressions(arg(1), arg(2), scope.dialect, "")
-	case "ARRAY_AGG", "LIST", "ARRAY":
+	case "ARRAY_AGG", "LIST", "ARRAY", "ARRAY_CONSTRUCT":
 		element := arg(0).dataType
 		return inferredExpression{dataType: DataType{Kind: DataTypeArray, Element: &element}, nullability: nullabilityUnknown}
 	case "RANGE", "GENERATE_SERIES":
@@ -781,6 +892,23 @@ func resolveSemanticIdentifier(value *IdentifierExpr, scope *semanticScope) infe
 	if value == nil || len(value.Parts) == 0 || value.Parts[len(value.Parts)-1].Text == "*" {
 		return inferredExpression{dataType: DataType{Kind: DataTypeUnknown}, nullability: nullabilityUnknown}
 	}
+	if local, ok := scope.locals[identifierKey(value.Parts[0], scope.dialect)]; ok {
+		for _, field := range value.Parts[1:] {
+			found := false
+			for _, candidate := range local.dataType.Fields {
+				if strings.EqualFold(candidate.Name, field.Text) {
+					local.dataType = candidate.Type
+					found = true
+					break
+				}
+			}
+			if !found {
+				local.dataType = DataType{Kind: DataTypeUnknown}
+				break
+			}
+		}
+		return local
+	}
 	columnName := value.Parts[len(value.Parts)-1].Text
 	qualifier := ""
 	if len(value.Parts) > 1 {
@@ -802,7 +930,11 @@ func resolveSemanticIdentifier(value *IdentifierExpr, scope *semanticScope) infe
 				continue
 			}
 			for _, column := range relation.columns {
-				if !strings.EqualFold(column.name, columnName) {
+				matchesName := strings.EqualFold(column.name, columnName)
+				if relation.kind == "cte" || relation.kind == "derived" {
+					matchesName = identifierKey(Identifier{Text: column.name, Quoted: column.quoted}, scope.dialect) == identifierKey(value.Parts[len(value.Parts)-1], scope.dialect)
+				}
+				if !matchesName {
 					continue
 				}
 				if relation.nullable {
@@ -816,6 +948,11 @@ func resolveSemanticIdentifier(value *IdentifierExpr, scope *semanticScope) infe
 		}
 		if len(matches) > 1 {
 			return inferredExpression{dataType: DataType{Kind: DataTypeUnknown}, nullability: nullabilityUnknown}
+		}
+		if qualifier == "" {
+			if alias, ok := current.aliases[identifierKey(value.Parts[0], current.dialect)]; ok {
+				return alias
+			}
 		}
 		if qualifier != "" {
 			for _, relation := range current.relations {
@@ -1119,9 +1256,9 @@ func semanticSchemaTableNames(table SchemaTable) []string {
 	return append(result, table.Aliases...)
 }
 
-func appendSemanticColumn(columns []semanticColumn, column semanticColumn) []semanticColumn {
+func appendSemanticColumn(columns []semanticColumn, column semanticColumn, dialect Dialect) []semanticColumn {
 	for index := range columns {
-		if strings.EqualFold(columns[index].name, column.name) {
+		if identifierKey(Identifier{Text: columns[index].name, Quoted: columns[index].quoted}, dialect) == identifierKey(Identifier{Text: column.name, Quoted: column.quoted}, dialect) {
 			return columns
 		}
 	}

@@ -144,6 +144,9 @@ func lineageFor(sql string, dialect Dialect, column string, ordinal int, schema 
 		return LineageNode{}, err
 	}
 	normalizeDuckDBStructFieldReferences(query, AnalyzeQueryOptions{Dialect: dialect, Schema: schema})
+	if hasNamedSetOperation(query) {
+		return namedSetLineage(query, column, ordinal, sql, AnalyzeQueryOptions{Dialect: dialect, Schema: schema})
+	}
 	output, err := outputColumnsForQuery(query, schema)
 	if err != nil {
 		return LineageNode{}, err
@@ -197,13 +200,13 @@ func lineageFor(sql string, dialect Dialect, column string, ordinal int, schema 
 			if selected >= len(branch.Projections) {
 				continue
 			}
-			branchNode := lineageForProjection(branch, selected, sql, schema)
+			branchNode := lineageForProjection(branch, selected, sql, schema, dialect)
 			branchNode.SetBranch = &SetBranch{Operator: operator, Ordinal: index, All: query.SetAll}
 			root.Downstream = append(root.Downstream, branchNode)
 		}
 		return root, nil
 	}
-	root.Downstream = lineageChildren(query.Projections[selected].Expr, query, sql, schema)
+	root.Downstream = lineageChildren(query.Projections[selected].Expr, query, sql, schema, dialect)
 	return root, nil
 }
 
@@ -228,7 +231,7 @@ func lineageQuery(sql string, dialect Dialect) (*SelectStmt, error) {
 	return nil, fmt.Errorf("lineage query is empty")
 }
 
-func lineageForProjection(query *SelectStmt, index int, sourceSQL string, schema *ValidationSchema) LineageNode {
+func lineageForProjection(query *SelectStmt, index int, sourceSQL string, schema *ValidationSchema, dialects ...Dialect) LineageNode {
 	projection := query.Projections[index]
 	name := projectionName(projection)
 	if name == "" {
@@ -240,18 +243,24 @@ func lineageForProjection(query *SelectStmt, index int, sourceSQL string, schema
 		Source:     lineageSQLJSON(sourceSQL),
 		SourceKind: "branch",
 	}
-	node.Downstream = lineageChildren(projection.Expr, query, sourceSQL, schema)
+	node.Downstream = lineageChildren(projection.Expr, query, sourceSQL, schema, dialects...)
 	return node
 }
 
-func lineageChildren(expression Expr, query *SelectStmt, sourceSQL string, schema *ValidationSchema) []LineageNode {
+func lineageChildren(expression Expr, query *SelectStmt, sourceSQL string, schema *ValidationSchema, dialects ...Dialect) []LineageNode {
 	if expression == nil {
 		return nil
 	}
 	relations := relationFacts(query, schema)
 	var result []LineageNode
 	seen := make(map[string]bool)
-	for _, reference := range Columns(expression) {
+	dialect := DialectGeneric
+	if len(dialects) > 0 {
+		dialect = dialects[0]
+	}
+	bindings := bindQuery(query, AnalyzeQueryOptions{Dialect: dialect, Schema: schema})
+	for _, binding := range bindings.references(expression, false) {
+		reference := binding.reference
 		relation := lineageRelationForReference(reference, relations, schema)
 		name := reference.Column
 		sourceName := ""
@@ -284,18 +293,18 @@ func lineageChildren(expression Expr, query *SelectStmt, sourceSQL string, schem
 			ReferenceNodeName: name,
 		}
 		if relation != nil {
-			child.Downstream = lineageReferenceChildren(reference.Column, *relation, query, sourceSQL, schema)
+			child.Downstream = lineageReferenceChildren(reference.Column, *relation, query, sourceSQL, schema, dialects...)
 		}
 		result = append(result, child)
 	}
 	return result
 }
 
-func lineageReferenceChildren(column string, relation RelationFact, query *SelectStmt, sourceSQL string, schema *ValidationSchema) []LineageNode {
+func lineageReferenceChildren(column string, relation RelationFact, query *SelectStmt, sourceSQL string, schema *ValidationSchema, dialects ...Dialect) []LineageNode {
 	if relation.Kind == "table_function" {
 		var result []LineageNode
 		for _, source := range tableFunctionSourceExpressions(query, relation) {
-			result = append(result, lineageChildren(source, query, sourceSQL, schema)...)
+			result = append(result, lineageChildren(source, query, sourceSQL, schema, dialects...)...)
 		}
 		return result
 	}
@@ -310,7 +319,7 @@ func lineageReferenceChildren(column string, relation RelationFact, query *Selec
 		if !strings.EqualFold(projectionName(projection), column) {
 			continue
 		}
-		return lineageChildren(projection.Expr, childQuery, sourceSQL, schema)
+		return lineageChildren(projection.Expr, childQuery, sourceSQL, schema, dialects...)
 	}
 	return nil
 }
@@ -378,6 +387,9 @@ func outputColumnsFor(sql string, dialect Dialect, schema *ValidationSchema) (Qu
 	query, err := lineageQuery(sql, dialect)
 	if err != nil {
 		return QueryOutput{}, err
+	}
+	if hasNamedSetOperation(query) {
+		return namedSetQueryOutput(bindQuery(query, AnalyzeQueryOptions{Dialect: dialect, Schema: schema})), nil
 	}
 	return outputColumnsForQuery(query, schema)
 }
