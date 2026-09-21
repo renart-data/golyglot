@@ -92,22 +92,22 @@ func TestColumnUsesFollowBothUnionBranches(t *testing.T) {
 	}
 }
 
-func TestColumnUsesDoNotGuessNameAlignedUnionLineage(t *testing.T) {
+func TestColumnUsesResolveNameAlignedUnionLineage(t *testing.T) {
 	schema := upstreamScopeSchema()
 	query := "WITH u AS (SELECT id AS amount FROM t2 UNION ALL BY NAME SELECT value AS amount FROM t1) SELECT 1 AS matched FROM u WHERE amount > 0"
 	diff, err := DiffQuerySemantics(query, query, QuerySemanticDiffOptions{Dialect: DialectDuckDB, BeforeSchema: &schema, AfterSchema: &schema})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if diff.Complete {
-		t.Fatal("unmodeled name-aligned lineage was reported as complete")
+	if !diff.Complete {
+		t.Fatal("known name-aligned lineage was reported as incomplete")
 	}
 	for _, use := range diff.BeforeAnalysis.ColumnUses {
-		if use.Context == "filter" && !use.Complete {
+		if use.Context == "filter" && use.Complete && len(use.Upstream) == 2 {
 			return
 		}
 	}
-	t.Fatal("missing incomplete predicate fact")
+	t.Fatal("missing both name-aligned predicate dependencies")
 }
 
 func TestColumnUsesTrackPresenceNullabilityAndIgnoreUnusedCTEs(t *testing.T) {

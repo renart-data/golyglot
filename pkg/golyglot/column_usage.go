@@ -16,23 +16,7 @@ type ColumnUseFact struct {
 }
 
 func (scope *queryScope) references(expression Node, aliases bool, preferAliases ...bool) []boundReference {
-	var result []boundReference
-	walkScopeColumns(expression, func(reference ColumnReference) {
-		binding := scope.atReference(reference).resolve(reference)
-		if aliases && reference.Table == "" && (binding.status == "missing" || (len(preferAliases) > 0 && preferAliases[0])) {
-			for _, projection := range scope.query.Projections {
-				if projection.Alias != nil && strings.EqualFold(projection.Alias.Text, reference.Column) {
-					for _, binding := range scope.references(projection.Expr, false) {
-						binding.reference.Span = reference.Span
-						result = append(result, binding)
-					}
-					return
-				}
-			}
-		}
-		result = append(result, binding)
-	})
-	return result
+	return scope.expandedReferences(expression, aliases, len(preferAliases) > 0 && preferAliases[0], make(map[*SelectItem]bool))
 }
 
 func (binding boundReference) fact() ColumnReferenceFact {
@@ -77,8 +61,17 @@ func (scope *queryScope) outputBindings(index int) ([]boundReference, bool) {
 	var result []boundReference
 	complete := true
 	if scope.query.SetLeft != nil {
-		result, complete = scope.bindings.queries[scope.query.SetLeft].outputBindings(index)
-	} else {
+		left := scope.bindings.queries[scope.query.SetLeft]
+		leftIndex := index
+		if setByName(scope.query) {
+			leftIndex = left.outputIndex(scope.outputs[index])
+		}
+		if leftIndex >= 0 {
+			result, complete = left.outputBindings(leftIndex)
+		} else {
+			complete = left.complete
+		}
+	} else if index < scope.leftOutputCount {
 		output := scope.outputs[index]
 		if output.relation != nil {
 			result = append(result, boundReference{reference: ColumnReference{Column: output.column}, relation: output.relation, status: "resolved"})
@@ -87,11 +80,15 @@ func (scope *queryScope) outputBindings(index int) ([]boundReference, bool) {
 		}
 	}
 	if scope.query.SetRight != nil && strings.HasSuffix(strings.ToUpper(scope.query.SetOperator), "UNION") {
-		if strings.Contains(strings.ToUpper(scope.query.SetModifier), "BY NAME") {
-			// Do not guess positional lineage for a name-aligned set operation.
-			return result, false
+		rightScope := scope.bindings.queries[scope.query.SetRight]
+		rightIndex := index
+		if setByName(scope.query) {
+			rightIndex = rightScope.outputIndex(scope.outputs[index])
 		}
-		right, known := scope.bindings.queries[scope.query.SetRight].outputBindings(index)
+		if rightIndex < 0 {
+			return result, complete && rightScope.complete
+		}
+		right, known := rightScope.outputBindings(rightIndex)
 		result = append(result, right...)
 		complete = complete && known
 	}
@@ -133,8 +130,8 @@ func bindingUpstream(binding boundReference, visiting map[scopeSourceKey]bool) (
 			return nil, false
 		}
 		found := false
-		for index, column := range relation.columns {
-			if !strings.EqualFold(column, binding.reference.Column) || index >= len(relation.source.outputs) {
+		for index := range relation.columns {
+			if !relation.matchesColumn(index, binding.reference) || index >= len(relation.source.outputs) {
 				continue
 			}
 			found = true

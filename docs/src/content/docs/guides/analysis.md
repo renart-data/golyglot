@@ -88,8 +88,9 @@ Expression and reference spans are byte offsets into the original SQL. An
 upstream reference retains the location where it is used, even when its
 physical column name differs from a CTE alias. Unknown and ambiguous bindings
 remain explicit; `Complete` is false when a use cannot be fully resolved.
-Implicit `NATURAL JOIN` keys and name-aligned set-operation lineage are not
-yet resolved; uses that depend on them are marked incomplete.
+Implicit `NATURAL JOIN` keys are not yet resolved; uses that depend on them
+are marked incomplete. `UNION BY NAME` aligns dependencies by output name,
+including missing columns that the set operation pads with NULL.
 Unused CTE definitions do not contribute result dependencies. These facts
 are separate from output-value lineage: a filter column is not added to a
 projection merely because it controls which rows survive.
@@ -107,3 +108,100 @@ at their original source locations.
 `Lineage` resolves a named output column to its source columns.
 `OpenLineageColumnLineage` and the job/run event helpers turn those
 dependencies into JSON-compatible OpenLineage payloads.
+
+## Lambdas and aliases
+
+Higher-order functions such as `TRANSFORM(values, x -> x + quantity)` bind
+`x` locally. It is not a table column and does not appear in lineage. The
+captured `quantity` still needs to resolve in the surrounding query. Nested
+lambdas can shadow outer parameters; Snowflake's `x INT -> ...` form also
+supplies a local type.
+
+Same-SELECT aliases are available to later expressions where the dialect
+supports them, including Snowflake and DuckDB. An input column takes
+precedence over a same-named alias, forward references are not accepted,
+and quoted names retain the dialect's case rules. Clause visibility is
+checked separately: for example, PostgreSQL does not expose SELECT aliases
+to WHERE or HAVING.
+
+## Set-operation contracts
+
+For a set operation, `Projections` describes the **combined output**, not
+just the first branch. Its type and nullability agree with `OutputColumns`;
+branch-specific expressions remain available in `SetOperations.Branches`.
+
+`UNION BY NAME` matches names instead of ordinals, preserves left-hand
+column order, and appends right-only names. Missing values are nullable.
+Duplicate names are rejected as ambiguous. Unknown wildcard schemas remain
+incomplete rather than being treated as empty branches. Public
+`OutputColumns` and `Lineage` use the same name alignment.
+`Lineage` returns an error when a name-aligned branch's wildcard cannot be
+resolved; it does not invent NULL padding for an unknown schema.
+
+## Grouping and function placement
+
+Semantic validation reports:
+
+| Code | Meaning |
+| --- | --- |
+| `E230` | A column is neither grouped nor aggregated. |
+| `E231` | An aggregate is in a disallowed clause or inside another aggregate. |
+| `E232` | A window function has invalid placement/nesting or needs OVER. |
+| `W002` | Grouping could not be checked for an opaque expression or unexpanded wildcard. |
+
+The checks account for grouping expressions, aliases, ordinals, grouping
+sets, and aggregate expressions inside windows. Declared PostgreSQL primary
+keys can establish functional dependency. SQLite and MySQL bare-column
+behavior is not rejected: MySQL's server SQL mode is not known here.
+These checks are not a replacement for the warehouse's own validator.
+
+Use `ValidationOptions{Semantic: false}` for syntax-only validation. The
+convenience `Validate` and `ValidateWithSchema` calls enable semantic checks.
+
+## Function and UDF catalogs
+
+Supply warehouse-specific signatures without connecting to the warehouse:
+
+```go
+catalog := &golyglot.FunctionCatalogSpec{
+	Functions: []golyglot.FunctionSpec{{
+		Name: "normalize_account",
+		Kind: golyglot.FunctionScalar,
+		Overloads: []golyglot.FunctionSignature{{
+			Parameters: []string{"VARCHAR"},
+			ReturnType: "VARCHAR",
+		}},
+	}},
+}
+
+validation := golyglot.ValidateWithOptions(sql, golyglot.ValidationOptions{
+	Dialect:         golyglot.DialectDuckDB,
+	Semantic:        true,
+	Schema:          &schema,
+	FunctionCatalog: catalog,
+})
+analysis, err := golyglot.AnalyzeQuery(sql, golyglot.AnalyzeQueryOptions{
+	Dialect:         golyglot.DialectDuckDB,
+	Schema:          &schema,
+	FunctionCatalog: catalog,
+})
+```
+
+Catalogs extend builtin inference by default. `Strict: true` instead
+requires every function name to be declared. `CaseSensitive` controls name
+matching globally, and a function's optional `CaseSensitive` overrides it.
+`Kind` is `scalar` (default), `aggregate`, or `window`, and participates in
+placement and grouping checks.
+
+`Parameters` and `ReturnType` use SQL type names. `ANY` is a wildcard
+parameter. `Variadic: true` repeats the final parameter one or more times.
+Exact argument matches are preferred to compatible conversions and `ANY`;
+unresolved overload ties with different return types remain unknown. The
+optional `Nullable` declares return nullability; omitting it leaves that
+fact unknown.
+
+Validation uses `E220` for undeclared strict-catalog functions, `E221` for
+argument-count mismatches, and `E222` for incompatible argument types.
+Invalid catalog definitions yield `FUNCTION_CATALOG_INVALID` during
+validation or a Go error from `AnalyzeQuery`. Catalogs are local to the call;
+they do not mutate a process-wide registry.

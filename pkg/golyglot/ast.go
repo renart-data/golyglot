@@ -19,6 +19,7 @@ const (
 	NodeStar                NodeKind = "star"
 	NodeUnary               NodeKind = "unary"
 	NodeBinary              NodeKind = "binary"
+	NodeLambda              NodeKind = "lambda"
 	NodeFunctionCall        NodeKind = "function_call"
 	NodeCall                NodeKind = "call"
 	NodeGeneric             NodeKind = "generic"
@@ -428,6 +429,21 @@ type BinaryExpr struct {
 	Right    Expr
 	Escape   Expr
 }
+
+// LambdaExpr represents a lambda with explicitly declared parameter types.
+// Untyped arrows retain their existing BinaryExpr representation.
+type LambdaExpr struct {
+	nodeBase
+	Parameters []LambdaParameter
+	Body       Expr
+}
+type LambdaParameter struct {
+	Name Identifier
+	Type string
+}
+
+func (*LambdaExpr) Kind() NodeKind  { return NodeLambda }
+func (*LambdaExpr) expressionNode() {}
 
 func (*BinaryExpr) Kind() NodeKind  { return NodeBinary }
 func (*BinaryExpr) expressionNode() {}

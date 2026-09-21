@@ -10,10 +10,11 @@ import (
 // when options are supplied explicitly, allowing callers to select a cheap
 // syntax-only pass; Validate without options enables them.
 type ValidationOptions struct {
-	Dialect      Dialect
-	StrictSyntax bool
-	Semantic     bool
-	Schema       *ValidationSchema
+	Dialect         Dialect
+	StrictSyntax    bool
+	Semantic        bool
+	Schema          *ValidationSchema
+	FunctionCatalog *FunctionCatalogSpec
 }
 
 // ValidationSchema is a small, dependency-free schema contract used by the
@@ -111,6 +112,13 @@ func ValidateWithOptions(sql string, options ValidationOptions) ValidationResult
 		options.Dialect = DialectGeneric
 	}
 	result := ValidationResult{Valid: true}
+	catalog, catalogErr := compileFunctionCatalog(options.FunctionCatalog, options.Dialect)
+	if catalogErr != nil {
+		collector := validationCollector{source: NewSourceText(sql), result: &result, dialect: options.Dialect}
+		collector.add(SeverityError, "FUNCTION_CATALOG_INVALID", catalogErr.Error(), Span{})
+		result.Valid = false
+		return result
+	}
 	mode := Tolerant
 	if options.StrictSyntax {
 		mode = Strict
@@ -148,7 +156,7 @@ func ValidateWithOptions(sql string, options ValidationOptions) ValidationResult
 		}
 	}
 	if options.Semantic {
-		collector := validationCollector{source: parsed.Source, result: &result, schema: options.Schema, dialect: options.Dialect, issueKeys: make(map[string]bool)}
+		collector := validationCollector{source: parsed.Source, result: &result, schema: options.Schema, dialect: options.Dialect, catalog: catalog, issueKeys: make(map[string]bool)}
 		for _, statement := range parsed.Statements {
 			collector.statement(statement.Node)
 		}
@@ -235,6 +243,7 @@ type validationCollector struct {
 	schema    *ValidationSchema
 	dialect   Dialect
 	issueKeys map[string]bool
+	catalog   *compiledFunctionCatalog
 }
 
 func (c *validationCollector) add(severity Severity, code, message string, span Span) {
@@ -317,7 +326,7 @@ func (c *validationCollector) selectStatement(selectStmt *SelectStmt) {
 	for _, scope := range root.bindings.scopes {
 		c.selectScope(scope)
 	}
-	semantics := analyzeSelectSemantics(selectStmt, AnalyzeQueryOptions{Dialect: c.dialect, Schema: c.schema}, nil)
+	semantics := analyzeSelectSemantics(selectStmt, AnalyzeQueryOptions{Dialect: c.dialect, Schema: c.schema, catalog: c.catalog}, nil)
 	for _, issue := range semantics.issues {
 		c.add(SeverityError, issue.code, issue.message, issue.span)
 	}
@@ -325,6 +334,7 @@ func (c *validationCollector) selectStatement(selectStmt *SelectStmt) {
 
 func (c *validationCollector) selectScope(scope *queryScope) {
 	selectStmt := scope.query
+	c.validateQueryRules(scope)
 	hasQueryBody := len(selectStmt.Projections) > 0 ||
 		len(selectStmt.ValuesRows) > 0 ||
 		(selectStmt.SetLeft != nil && selectStmt.SetRight != nil)
@@ -372,7 +382,21 @@ func (c *validationCollector) selectScope(scope *queryScope) {
 	if c.schema != nil {
 		c.validateBoundSchema(scope)
 	}
-	if selectStmt.SetRight != nil {
+	if setByName(selectStmt) {
+		left := scope.outputs[:scope.leftOutputCount]
+		right := scope.bindings.queries[selectStmt.SetRight].outputs
+		for _, outputs := range [][]scopeOutput{left, right} {
+			seen := make(map[string]bool)
+			for _, output := range outputs {
+				name := identifierKey(Identifier{Text: output.name, Quoted: output.quoted}, c.dialect)
+				if name != "" && seen[name] {
+					c.add(SeverityError, "SEMANTIC_SET_DUPLICATE_NAME", fmt.Sprintf("UNION BY NAME output %q is ambiguous", output.name), selectStmt.SourceSpan())
+				}
+				seen[name] = true
+			}
+		}
+	}
+	if selectStmt.SetRight != nil && !setByName(selectStmt) {
 		left := selectStmt
 		if selectStmt.SetLeft != nil {
 			left = selectStmt.SetLeft
@@ -421,25 +445,22 @@ func (c *validationCollector) validateBoundSchema(scope *queryScope) {
 			aliasContexts[expression.SourceSpan()] = false
 		}
 	}
-	walkScopeColumns(scope.query, func(reference ColumnReference) {
-		binding := scope.atReference(reference).resolve(reference)
-		if reference.Table == "" {
-			for span, preferAlias := range aliasContexts {
-				if reference.Span.Start < span.Start || reference.Span.End > span.End || (!preferAlias && binding.status != "missing") {
-					continue
-				}
-				for _, projection := range scope.query.Projections {
-					if projection.Alias != nil && strings.EqualFold(projection.Alias.Text, reference.Column) {
-						for _, projected := range scope.references(projection.Expr, false) {
-							projected.reference.Span = reference.Span
-							validate(projected)
-						}
-						return
-					}
-				}
+	walkLexicalColumns(scope.query, c.dialect, func(reference ColumnReference) {
+		aliases, prefer := false, false
+		for span, preference := range aliasContexts {
+			if reference.Span.Start >= span.Start && reference.Span.End <= span.End {
+				aliases, prefer = true, preference
+				break
 			}
 		}
-		validate(binding)
+		if projection := scope.aliasForReference(reference, aliases, prefer); projection != nil {
+			for _, projected := range scope.references(projection.Expr, false) {
+				projected.reference.Span = reference.Span
+				validate(projected)
+			}
+			return
+		}
+		validate(scope.atReference(reference).resolve(reference))
 	})
 }
 

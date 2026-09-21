@@ -148,6 +148,34 @@ func (transformer targetTransformer) expr(expression Expr, target Dialect) Expr 
 				}
 			}
 		}
+	case *LambdaExpr:
+		if len(expression.Parameters) == 0 {
+			return expression
+		}
+		body := transformExpr(expression.Body, target)
+		parameters := make([]Expr, len(expression.Parameters))
+		for index, parameter := range expression.Parameters {
+			parameters[index] = &IdentifierExpr{Parts: []Identifier{parameter.Name}}
+			refs := make(map[Span]bool)
+			walkLexicalColumns(body, DialectSnowflake, func(ref ColumnReference) {
+				if strings.EqualFold(ref.Column, parameter.Name.Text) && ref.Table == "" {
+					refs[ref.Span] = true
+				}
+			})
+			visited := make(map[*IdentifierExpr]bool)
+			body = Transform(body, func(node Node) Node {
+				if id, ok := node.(*IdentifierExpr); ok && refs[id.SourceSpan()] && !visited[id] {
+					visited[id] = true
+					return &CastExpr{Keyword: "CAST", Value: id, Type: &RawExpr{Raw: canonicalLambdaType(parameter.Type)}}
+				}
+				return node
+			}).(Expr)
+		}
+		left := parameters[0]
+		if len(parameters) > 1 {
+			left = &TupleExpr{Items: parameters}
+		}
+		return &BinaryExpr{nodeBase: expression.nodeBase, Left: left, Operator: "->", Right: body}
 	case *BinaryExpr:
 		leftBoolean := false
 		leftBooleanRaw := "TRUE"

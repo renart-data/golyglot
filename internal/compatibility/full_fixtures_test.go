@@ -309,6 +309,20 @@ func runFullDialectFixtures(t *testing.T, path, fileDialect string) fullFixtureS
 	var transpilationStats fullFixtureStats
 	for index, test := range fixture.Transpilation {
 		for targetName, want := range test.Write {
+			// Two pinned expectations predate the NULL-winner correction.
+			// Keep the upstream snapshot untouched; assert the exact corrected
+			// output instead. TestAthenaDuckDBResults executes both forms with
+			// NULL winners so these exceptions cannot mask semantic regressions.
+			if fileDialect == "presto" && targetName == "duckdb" {
+				switch {
+				case index == 75 && test.SQL == "SELECT MAX_BY(a.id, a.timestamp) FROM a" && want == "SELECT ARG_MAX(a.id, a.timestamp) FROM a":
+					want = "SELECT ARG_MAX_NULL(a.id, a.timestamp) FROM a"
+					t.Log("presto write duckdb:75: checking NULL-preserving correction to pinned expectation")
+				case index == 76 && test.SQL == "SELECT MIN_BY(a.id, a.timestamp, 3) FROM a" && want == "SELECT ARG_MIN(a.id, a.timestamp, 3) FROM a":
+					want = "SELECT LIST_SLICE(LIST(a.id ORDER BY a.timestamp) FILTER(WHERE a.timestamp IS NOT NULL), 1, 3) FROM a"
+					t.Log("presto write duckdb:76: checking NULL-preserving correction to pinned expectation")
+				}
+			}
 			target, targetVersion, err := fullParseDialect(targetName)
 			if err != nil {
 				transpilationStats.record(fmt.Sprintf("%s write %s:%d", fileDialect, targetName, index), test.SQL, want, "", err)
