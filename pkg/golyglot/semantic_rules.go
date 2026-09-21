@@ -264,8 +264,10 @@ func (c *validationCollector) validateQueryRules(scope *queryScope) {
 	}
 	checkGrouped(q.Having, nil, make(map[*SelectItem]bool))
 	checkGrouped(q.Qualify, nil, make(map[*SelectItem]bool))
-	for _, order := range q.OrderBy {
-		checkGrouped(scope.clauseExpression(order.Expr, false), nil, make(map[*SelectItem]bool))
+	if scope.compoundOrder == nil {
+		for _, order := range q.OrderBy {
+			checkGrouped(scope.clauseExpression(order.Expr, false), nil, make(map[*SelectItem]bool))
+		}
 	}
 	for _, window := range q.Windows {
 		var children []Node

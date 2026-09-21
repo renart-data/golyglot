@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.11 - 2026-09-22
+
+### Fixed
+
+- Bind compound-query `ORDER BY` to the combined output instead of the last UNION arm, preserving per-arm grouping checks, parenthesized local ordering, and both branches in lineage.
+- Infer DuckDB `epoch(...)` as `DOUBLE`, avoiding false temporal/numeric arithmetic errors in timestamp-window filters.
+
 ## 0.1.0-alpha.10 - 2026-09-22
 
 - Add an offline, copy-safe builtin function metadata API with versioned DuckDB,

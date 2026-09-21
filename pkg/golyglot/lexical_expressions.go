@@ -170,7 +170,11 @@ func (scope *queryScope) aliasForReference(reference ColumnReference, aliases, p
 	if reference.Table != "" {
 		return nil
 	}
-	binding := scope.atReference(reference).resolve(reference)
+	visible := scope.atReference(reference)
+	if visible == scope.compoundOrder {
+		return nil // Compound output aliases are columns, not last-arm expressions.
+	}
+	binding := visible.resolve(reference)
 	if !prefer && binding.status != "missing" {
 		return nil
 	}

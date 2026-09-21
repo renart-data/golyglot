@@ -2,6 +2,33 @@ package golyglot
 
 import "testing"
 
+func TestDuckDBEpochInferenceMatchesNativeReturnType(t *testing.T) {
+	// DuckDB 1.5.1: every epoch overload returns DOUBLE, not its input type.
+	for _, input := range []string{
+		`TIMESTAMP '2026-09-22 00:00:00'`, `DATE '2026-09-22'`,
+		`TIME '01:02:03'`, `INTERVAL '1 hour'`, `CAST(NULL AS TIMESTAMP)`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			query := "SELECT epoch(" + input + ") AS seconds, epoch(" + input + ") * 1000 AS milliseconds"
+			analysis, err := AnalyzeQuery(query, AnalyzeQueryOptions{Dialect: DialectDuckDB})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(analysis.OutputColumns) != 2 || !analysis.OutputTypesComplete {
+				t.Fatalf("incomplete epoch output: %#v", analysis.OutputColumns)
+			}
+			for _, column := range analysis.OutputColumns {
+				if column.TypeHint == nil || *column.TypeHint != "DOUBLE" {
+					t.Errorf("epoch output = %#v, want DOUBLE", column)
+				}
+			}
+			if v := Validate(query, DialectDuckDB); !v.Valid {
+				t.Fatalf("valid epoch arithmetic rejected: %#v", v.Errors)
+			}
+		})
+	}
+}
+
 func TestParseDataTypeKeepsLogicalStructure(t *testing.T) {
 	tests := []struct {
 		input   string

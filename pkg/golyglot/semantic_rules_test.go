@@ -42,6 +42,61 @@ func TestGroupAliasDialectVisibility(t *testing.T) {
 	}
 }
 
+func TestCompoundOrderByUsesCombinedOutputNamespace(t *testing.T) {
+	schema := upstreamScopeSchema()
+	strict := true
+	schema.Strict = &strict
+	for _, dialect := range []Dialect{DialectDuckDB, DialectPostgreSQL} {
+		for _, sql := range []string{
+			`SELECT 1 AS step_order, COUNT(*) AS n FROM t1 UNION ALL SELECT 2, COUNT(*) FROM t1 ORDER BY step_order`,
+			`SELECT id AS key, COUNT(*) AS n FROM t1 GROUP BY id UNION ALL SELECT value, COUNT(*) FROM t1 GROUP BY value ORDER BY key`,
+			`SELECT 1 AS step_order, COUNT(*) AS n FROM t1 UNION ALL SELECT 2, COUNT(*) FROM t1 UNION ALL SELECT 3, COUNT(*) FROM t1 ORDER BY step_order`,
+			`SELECT 1 AS step_order, COUNT(*) AS n FROM t1 UNION ALL (SELECT 2, COUNT(*) FROM t1) ORDER BY step_order`,
+			`SELECT id AS key FROM t1 UNION ALL (SELECT value FROM t1 ORDER BY value) ORDER BY key`,
+		} {
+			t.Run(string(dialect)+"/"+sql, func(t *testing.T) {
+				v := ValidateWithSchema(sql, schema, dialect)
+				if !v.Valid || len(v.Errors) != 0 {
+					t.Fatalf("valid compound ordering rejected: %#v", v.Errors)
+				}
+			})
+		}
+	}
+	for _, tc := range []struct{ sql, code string }{
+		{`SELECT 1 AS step_order, COUNT(*) FROM t1 UNION ALL SELECT id, COUNT(*) FROM t1 ORDER BY step_order`, "E230"},
+		{`SELECT 1 AS step_order, COUNT(*) FROM t1 UNION ALL (SELECT 2, COUNT(*) FROM t1 ORDER BY id)`, "E230"},
+		{`SELECT id AS key FROM t1 UNION ALL SELECT value FROM t1 ORDER BY missing`, "SCHEMA_UNKNOWN_COLUMN"},
+	} {
+		t.Run(tc.sql, func(t *testing.T) {
+			v := ValidateWithSchema(tc.sql, schema, DialectDuckDB)
+			if v.Valid || !hasValidationCode(v.Errors, tc.code) {
+				t.Fatalf("want %s: %#v", tc.code, v.Errors)
+			}
+		})
+	}
+}
+
+func TestCompoundOrderByRetainsBothBranchesInLineage(t *testing.T) {
+	schema := ValidationSchema{Tables: []SchemaTable{
+		{Name: "first_table", Columns: []SchemaColumn{{Name: "amount", Type: "INTEGER"}}},
+		{Name: "second_table", Columns: []SchemaColumn{{Name: "cost", Type: "INTEGER"}}},
+	}}
+	analysis, err := AnalyzeQuery(`SELECT SUM(amount) AS total FROM first_table UNION ALL SELECT SUM(cost) FROM second_table ORDER BY total`, AnalyzeQueryOptions{Dialect: DialectDuckDB, Schema: &schema})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, use := range analysis.ColumnUses {
+		if use.Context != "order" {
+			continue
+		}
+		if !use.Complete || len(use.Upstream) != 2 {
+			t.Fatalf("compound ORDER BY lineage = %#v", use)
+		}
+		return
+	}
+	t.Fatal("missing compound ORDER BY column use")
+}
+
 func TestSemanticRulesAcceptValidScopes(t *testing.T) {
 	schema := upstreamScopeSchema()
 	for _, sql := range []string{

@@ -25,6 +25,7 @@ type queryScope struct {
 	using           map[Span][]boundReference
 	usingOrder      []Span
 	coalesced       map[string][]*scopeRelation
+	compoundOrder   *queryScope
 }
 
 type scopeRelation struct {
@@ -212,6 +213,7 @@ func (b *queryBindings) build(query *SelectStmt, parent *queryScope, ctes map[st
 			}
 		}
 	}
+	scope.bindCompoundOrder()
 	// Register scalar/EXISTS/IN subqueries without walking into another block.
 	Walk(query, func(node Node) VisitAction {
 		if child, ok := node.(*SelectStmt); ok && child != query {
@@ -221,6 +223,30 @@ func (b *queryBindings) build(query *SelectStmt, parent *queryScope, ctes map[st
 		return VisitChildren
 	})
 	return scope
+}
+
+// A trailing ORDER BY on an unparenthesized set arm orders the combined
+// result, not that arm's input rows. Keep the public AST unchanged, but bind
+// the clause to a derived output relation so aliases and lineage cover the
+// entire set. Parenthesized arms retain their own local ORDER BY scope.
+func (scope *queryScope) bindCompoundOrder() {
+	if scope.query.SetRight == nil {
+		return
+	}
+	owner := scope
+	for len(owner.query.OrderBy) == 0 {
+		right := owner.query.SetRight
+		if right == nil || right.Parenthesized || owner.query.SetRightParen {
+			return
+		}
+		owner = scope.bindings.queries[right]
+		if owner == nil {
+			return
+		}
+	}
+	relation := &scopeRelation{kind: "derived", source: scope, owner: scope}
+	relation.setOutputColumns(nil)
+	owner.compoundOrder = &queryScope{query: scope.query, bindings: scope.bindings, relations: []*scopeRelation{relation}}
 }
 
 func (relation *scopeRelation) setOutputColumns(aliases []Identifier) {
@@ -372,6 +398,14 @@ func (scope *queryScope) snapshot() *queryScope {
 }
 
 func (scope *queryScope) atReference(reference ColumnReference) *queryScope {
+	if scope.compoundOrder != nil {
+		for _, order := range scope.query.OrderBy {
+			span := order.Expr.SourceSpan()
+			if reference.Span.Start >= span.Start && reference.Span.End <= span.End {
+				return scope.compoundOrder
+			}
+		}
+	}
 	for span, joined := range scope.joins {
 		if reference.Span.Start >= span.Start && reference.Span.End <= span.End {
 			return joined
