@@ -771,6 +771,9 @@ func inferSemanticFunction(value *FunctionCallExpr, scope *semanticScope, issues
 	known := func(kind DataTypeKind, nullable string) inferredExpression {
 		return inferredExpression{dataType: DataType{Kind: kind}, nullability: nullable}
 	}
+	if scope.dialect == DialectDuckDB && name == "EPOCH" && len(value.Name) == 1 {
+		return known(DataTypeDouble, combinedArgumentNullability(args))
+	}
 	switch name {
 	case "TRANSFORM", "LIST_TRANSFORM", "LIST_APPLY", "ARRAY_APPLY", "ARRAY_TRANSFORM", "ZIP_WITH", "ARRAYMAP":
 		index := len(args) - 1
