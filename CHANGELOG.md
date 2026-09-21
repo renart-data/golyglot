@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.10 - 2026-09-22
+
 - Add an offline, copy-safe builtin function metadata API with versioned DuckDB,
   PostgreSQL and ClickHouse inventories for editor completion and signature help.
   Catalog facts remain separate from argument-dependent type inference.
