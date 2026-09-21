@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add an offline, copy-safe builtin function metadata API with versioned DuckDB,
+  PostgreSQL and ClickHouse inventories for editor completion and signature help.
+  Catalog facts remain separate from argument-dependent type inference.
+- Add a reproducible catalog generator and opt-in, isolated engine observations.
+- Include separately verified SQL expression forms such as COALESCE and NULLIF,
+  without claiming fixed return types for argument-dependent expressions.
+- Accept SAMPLE as an unquoted CTE/relation name in DuckDB, PostgreSQL and
+  ClickHouse, preserving expression completion inside incomplete nested calls.
+
 ## 0.1.0-alpha.9 - 2026-09-21
 
 - Resolve higher-order lambda parameters and supported same-SELECT aliases
