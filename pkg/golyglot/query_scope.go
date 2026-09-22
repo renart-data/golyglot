@@ -29,14 +29,15 @@ type queryScope struct {
 }
 
 type scopeRelation struct {
-	name, alias, kind string
-	span              Span
-	columns           []string
-	columnQuotes      []bool
-	known             bool
-	source            *queryScope
-	arguments         []Expr
-	owner             *queryScope
+	name, alias, kind  string
+	span               Span
+	columns            []string
+	columnQuotes       []bool
+	columnAliasIndexes map[string]int
+	known              bool
+	source             *queryScope
+	arguments          []Expr
+	owner              *queryScope
 }
 
 type scopeOutput struct {
@@ -246,7 +247,47 @@ func (scope *queryScope) bindCompoundOrder() {
 	}
 	relation := &scopeRelation{kind: "derived", source: scope, owner: scope}
 	relation.setOutputColumns(nil)
+	if scope.bindings.options.Dialect == DialectDuckDB {
+		// DuckDB also accepts names from later arms; the first occurrence
+		// wins when different arms name different output positions alike.
+		relation.columnAliasIndexes = make(map[string]int)
+		positions := make([]int, len(scope.outputs))
+		for index := range positions {
+			positions[index] = index
+		}
+		scope.collectCompoundOrderAliases(relation.columnAliasIndexes, positions)
+	}
 	owner.compoundOrder = &queryScope{query: scope.query, bindings: scope.bindings, relations: []*scopeRelation{relation}}
+}
+
+func (scope *queryScope) collectCompoundOrderAliases(aliases map[string]int, positions []int) {
+	for index, output := range scope.outputs {
+		if index >= len(positions) || positions[index] < 0 || output.name == "" {
+			continue
+		}
+		key := identifierKey(Identifier{Text: output.name, Quoted: output.quoted}, scope.bindings.options.Dialect)
+		if _, exists := aliases[key]; !exists {
+			aliases[key] = positions[index]
+		}
+	}
+	for _, query := range []*SelectStmt{scope.query.SetLeft, scope.query.SetRight} {
+		child := scope.bindings.queries[query]
+		if child == nil {
+			continue
+		}
+		childPositions := make([]int, len(child.outputs))
+		for index, output := range child.outputs {
+			parentIndex := index
+			if setByName(scope.query) {
+				parentIndex = scope.outputIndex(output)
+			}
+			childPositions[index] = -1
+			if parentIndex >= 0 && parentIndex < len(positions) {
+				childPositions[index] = positions[parentIndex]
+			}
+		}
+		child.collectCompoundOrderAliases(aliases, childPositions)
+	}
 }
 
 func (relation *scopeRelation) setOutputColumns(aliases []Identifier) {

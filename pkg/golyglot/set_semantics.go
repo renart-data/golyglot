@@ -78,5 +78,9 @@ func (relation *scopeRelation) matchesColumn(index int, reference ColumnReferenc
 		}
 	}
 	dialect := relation.owner.bindings.options.Dialect
+	if relation.columnAliasIndexes != nil {
+		position, exists := relation.columnAliasIndexes[identifierKey(name, dialect)]
+		return exists && position == index
+	}
 	return identifierKey(column, dialect) == identifierKey(name, dialect)
 }
