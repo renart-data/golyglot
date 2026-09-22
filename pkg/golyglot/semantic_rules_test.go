@@ -97,6 +97,63 @@ func TestCompoundOrderByRetainsBothBranchesInLineage(t *testing.T) {
 	t.Fatal("missing compound ORDER BY column use")
 }
 
+func TestDuckDBCompoundOrderByAcceptsLaterArmAliases(t *testing.T) {
+	schema := upstreamScopeSchema()
+	strict := true
+	schema.Strict = &strict
+	for _, query := range []string{
+		`SELECT id AS first_key FROM t1 UNION ALL SELECT value AS later_key FROM t1 ORDER BY later_key`,
+		`SELECT SUM(id) AS first_key FROM t1 UNION ALL SELECT SUM(value) AS later_key FROM t1 ORDER BY later_key`,
+		`SELECT id AS first_key FROM t1 UNION ALL SELECT value AS middle_key FROM t1 UNION ALL SELECT id AS last_key FROM t1 ORDER BY middle_key`,
+		`SELECT id AS "First Key" FROM t1 UNION ALL SELECT value AS "Later Key" FROM t1 ORDER BY "Later Key"`,
+		`(SELECT id AS first_key FROM t1 UNION ALL SELECT value AS middle_key FROM t1) UNION ALL SELECT id AS last_key FROM t1 ORDER BY middle_key`,
+		`SELECT id AS first_key FROM t1 UNION BY NAME SELECT value AS later_key FROM t1 ORDER BY later_key`,
+		`SELECT id AS a, value AS b FROM t1 UNION ALL SELECT id AS b, value AS a FROM t1 ORDER BY a`,
+		`SELECT id AS x, value AS y FROM t1 UNION ALL SELECT id AS z, value AS other FROM t1 UNION ALL SELECT id AS another, value AS z FROM t1 ORDER BY z`,
+	} {
+		t.Run(query, func(t *testing.T) {
+			if v := ValidateWithSchema(query, schema, DialectDuckDB); !v.Valid || len(v.Errors) > 0 {
+				t.Fatalf("DuckDB accepts aliases from every set arm: %#v", v.Errors)
+			}
+		})
+	}
+	query := `SELECT id AS first_key FROM t1 UNION ALL SELECT value AS later_key FROM t1 ORDER BY later_key`
+	if v := ValidateWithSchema(query, schema, DialectPostgreSQL); v.Valid || !hasValidationCode(v.Errors, "SCHEMA_UNKNOWN_COLUMN") {
+		t.Fatalf("DuckDB alias visibility leaked to PostgreSQL: %#v", v.Errors)
+	}
+}
+
+func TestDuckDBCompoundOrderAliasKeepsPositionalLineage(t *testing.T) {
+	schema := upstreamScopeSchema()
+	for _, query := range []string{
+		`SELECT id AS a, value AS b FROM t1 UNION ALL SELECT id AS b, value AS a FROM t1 ORDER BY b`,
+		`SELECT id AS a, value AS b FROM t1 UNION ALL SELECT id AS c, value AS later_key FROM t1 ORDER BY later_key`,
+	} {
+		analysis, err := AnalyzeQuery(query, AnalyzeQueryOptions{Dialect: DialectDuckDB, Schema: &schema})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, use := range analysis.ColumnUses {
+			if use.Context != "order" {
+				continue
+			}
+			found = true
+			if !use.Complete || len(use.Upstream) == 0 {
+				t.Fatalf("incomplete alias lineage: %#v", use)
+			}
+			for _, ref := range use.Upstream {
+				if ref.Column != "value" {
+					t.Fatalf("order alias did not resolve to the second output position: %#v", use)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("missing order lineage")
+		}
+	}
+}
+
 func TestSemanticRulesAcceptValidScopes(t *testing.T) {
 	schema := upstreamScopeSchema()
 	for _, sql := range []string{

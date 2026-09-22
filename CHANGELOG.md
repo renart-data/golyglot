@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.12 - 2026-09-22
+
+### Fixed
+
+- Preserve DuckDB's visibility of aliases from later UNION arms in compound `ORDER BY`, including first-occurrence precedence, positional lineage, and `UNION BY NAME`. Other dialects retain their own output-name visibility.
+
 ## 0.1.0-alpha.11 - 2026-09-22
 
 ### Fixed
