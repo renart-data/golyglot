@@ -45,6 +45,8 @@ const (
 	DialectDremio      Dialect = "dremio"
 	DialectExasol      Dialect = "exasol"
 	DialectDataFusion  Dialect = "datafusion"
+	DialectHANA        Dialect = "hana"
+	DialectVertica     Dialect = "vertica"
 )
 
 // ParseDialect accepts Polyglot-style names and common aliases.
@@ -122,6 +124,10 @@ func ParseDialect(name string) (Dialect, error) {
 		return DialectExasol, nil
 	case "datafusion", "data_fusion":
 		return DialectDataFusion, nil
+	case "hana", "saphana", "sap_hana", "sap-hana":
+		return DialectHANA, nil
+	case "vertica":
+		return DialectVertica, nil
 	default:
 		return "", fmt.Errorf("unknown SQL dialect %q", name)
 	}
@@ -166,6 +172,8 @@ var supportedDialects = []Dialect{
 	DialectDremio,
 	DialectExasol,
 	DialectDataFusion,
+	DialectHANA,
+	DialectVertica,
 }
 
 // Dialects returns the canonical dialect names understood by the parser and

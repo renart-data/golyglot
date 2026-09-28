@@ -137,6 +137,11 @@ func (l *lexer) run() {
 		case c == '$' && l.pos+1 < len(l.text) && isASCIIDigit(l.text[l.pos+1]):
 			l.scanParameter()
 		case c == '@':
+			if l.options.Dialect == DialectVertica {
+				l.pos++
+				l.emit(TokenOperator, start, l.pos)
+				break
+			}
 			if strings.HasPrefix(l.text[l.pos:], "@>") ||
 				(l.options.Dialect == DialectPostgreSQL && (strings.HasPrefix(l.text[l.pos:], "@?") || strings.HasPrefix(l.text[l.pos:], "@@"))) {
 				l.scanOperator()
@@ -227,7 +232,7 @@ func (l *lexer) scanLineComment(prefix int) {
 func (l *lexer) scanBlockComment() {
 	start := l.pos
 	l.pos += 2
-	if l.options.Dialect == DialectSnowflake || l.options.Dialect == DialectOracle {
+	if l.options.Dialect == DialectSnowflake || l.options.Dialect == DialectOracle || l.options.Dialect == DialectHANA || l.options.Dialect == DialectVertica {
 		for l.pos < len(l.text) && !strings.HasPrefix(l.text[l.pos:], "*/") {
 			l.pos += runeWidth(l.text[l.pos:])
 		}
@@ -649,6 +654,11 @@ func (l *lexer) scanIdentifier() {
 
 func (l *lexer) scanOperator() {
 	start := l.pos
+	if l.options.Dialect == DialectVertica && strings.HasPrefix(l.text[start:], "!!") {
+		l.pos += 2
+		l.emit(TokenOperator, start, l.pos)
+		return
+	}
 	for _, operator := range []string{
 		"!~~*", "!~~", "~~~", "||/", "<<->>", "@?", "#>>", "#-", "@@", "|/", "~~*", "~~", "^@", "!~*", "~*", "->>", "-|-", "<=>", "<->", "??", "!~", "!:>", ":>", "::", "^=", ">=", "<=", "<>", "!=", "==", "||", "&&", "->", "=>", ":=", "<<", ">>", "**", "//", "#>", "@>", "<@", "?&", "?|",
 	} {

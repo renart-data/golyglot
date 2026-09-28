@@ -512,7 +512,11 @@ func inferSemanticExpression(expression Expr, scope *semanticScope, issues *[]se
 	case *IdentifierExpr:
 		return resolveSemanticIdentifier(value, scope)
 	case *LiteralExpr:
-		return inferSemanticLiteral(value)
+		result := inferSemanticLiteral(value)
+		if scope.dialect == DialectVertica && isSemanticInteger(result.dataType) {
+			result.dataType.Kind = DataTypeBigInt
+		}
+		return result
 	case *TypedLiteralExpr:
 		parsed := dataTypeForName(identifiersText(value.TypeName))
 		return inferredExpression{dataType: parsed, nullability: nullabilityNonNull}
@@ -727,6 +731,10 @@ func inferSemanticFunction(value *FunctionCallExpr, scope *semanticScope, issues
 	name := strings.ToUpper(lastIdentifier(identifiersText(value.Name)))
 	args := make([]inferredExpression, 0, len(value.Args))
 	for index, argument := range value.Args {
+		if isVerticaDateUnitArgument(value, index, scope.dialect) {
+			args = append(args, inferredExpression{dataType: DataType{Kind: DataTypeString}, nullability: nullabilityNonNull})
+			continue
+		}
 		parameters, body, lambda := lambdaParts(argument)
 		if lambda && lambdaArgument(value, index) {
 			child := *scope
@@ -769,7 +777,31 @@ func inferSemanticFunction(value *FunctionCallExpr, scope *semanticScope, issues
 		return inferred
 	}
 	known := func(kind DataTypeKind, nullable string) inferredExpression {
+		if scope.dialect == DialectVertica && kind == DataTypeInteger {
+			kind = DataTypeBigInt
+		}
 		return inferredExpression{dataType: DataType{Kind: kind}, nullability: nullable}
+	}
+	if len(value.Name) == 1 && !value.Name[0].Quoted {
+		if kind := hanaVerticaClockType(value.Name[0], scope.dialect, false); kind != DataTypeUnknown && (len(value.Args) == 0 || scope.dialect == DialectHANA && len(value.Args) == 1 && name == "CURRENT_UTCTIMESTAMP") {
+			return known(kind, nullabilityNonNull)
+		}
+		if scope.dialect == DialectVertica {
+			switch name {
+			case "TIMESTAMPADD":
+				result := arg(2)
+				if result.dataType.Kind == DataTypeDate {
+					result.dataType = DataType{Kind: DataTypeTimestamp}
+				}
+				if result.dataType.Kind != DataTypeTimestamp {
+					result.dataType = DataType{Kind: DataTypeUnknown}
+				}
+				result.nullability = combinedArgumentNullability(args)
+				return result
+			case "DATEDIFF", "TIMESTAMPDIFF", "APPROXIMATE_COUNT_DISTINCT":
+				return known(DataTypeBigInt, combinedArgumentNullability(args))
+			}
+		}
 	}
 	if scope.dialect == DialectDuckDB && name == "EPOCH" && len(value.Name) == 1 {
 		return known(DataTypeDouble, combinedArgumentNullability(args))
@@ -894,6 +926,11 @@ func inferSemanticFunction(value *FunctionCallExpr, scope *semanticScope, issues
 func resolveSemanticIdentifier(value *IdentifierExpr, scope *semanticScope) inferredExpression {
 	if value == nil || len(value.Parts) == 0 || value.Parts[len(value.Parts)-1].Text == "*" {
 		return inferredExpression{dataType: DataType{Kind: DataTypeUnknown}, nullability: nullabilityUnknown}
+	}
+	if len(value.Parts) == 1 {
+		if kind := hanaVerticaClockType(value.Parts[0], scope.dialect, true); kind != DataTypeUnknown {
+			return inferredExpression{dataType: DataType{Kind: kind}, nullability: nullabilityNonNull}
+		}
 	}
 	if local, ok := scope.locals[identifierKey(value.Parts[0], scope.dialect)]; ok {
 		for _, field := range value.Parts[1:] {

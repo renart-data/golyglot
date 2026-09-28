@@ -7,7 +7,7 @@ The alpha release currently exposes:
 
 - `Parse`, `ParseTolerant`, and `ParseStrict`
 - `Generate`, `Format`, and `Transpile`
-- 34 registered dialect names plus aliases
+- 36 registered dialect names plus aliases, including SAP HANA and Vertica
 - Typed AST nodes with source spans
 - Fluent expressions, SELECT queries, CTEs, set operations, and common DML builders
 - Syntax, semantic, and schema-aware validation
@@ -18,3 +18,7 @@ The alpha release currently exposes:
 - `Walk`, `FindAll`, `Transform`, and column-reference helpers
 
 The public package is intentionally independent of cgo, WASM, FFI, and LSP protocol packages. The browser demo is a separate adapter around the same Go API.
+
+Registration is not a claim of complete vendor SQL or arbitrary cross-engine
+equivalence. See the [dialect reference](/reference/dialects/) for HANA/Vertica
+coverage and unsupported conversions.

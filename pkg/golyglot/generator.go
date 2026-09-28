@@ -1325,7 +1325,7 @@ func (g generator) functionArgument(function *FunctionCallExpr, arg Expr) (strin
 
 func (g generator) prettyFunctionCall(function *FunctionCallExpr, parentPrecedence int) (string, error) {
 	name := generateFunctionName(function.Name)
-	if len(function.Name) > 0 && !function.Name[len(function.Name)-1].Quoted {
+	if g.dialect != DialectHANA && len(function.Name) > 0 && !function.Name[len(function.Name)-1].Quoted {
 		parts := make([]Identifier, len(function.Name))
 		copy(parts, function.Name)
 		parts[len(parts)-1].Text = strings.ToUpper(parts[len(parts)-1].Text)
@@ -3058,11 +3058,15 @@ func (g generator) expr(expression Expr, parentPrecedence int) (string, error) {
 		}
 		text = value + " " + expression.Operator + " " + right
 	case *FunctionCallExpr:
+		if g.dialect == DialectVertica && len(expression.Name) == 1 && !expression.Name[0].Quoted && strings.EqualFold(expression.Name[0].Text, "FACTORIAL") && len(expression.Args) == 1 && expression.RawArgs == "" && expression.ArgumentTail == "" && !expression.Distinct && expression.Filter == nil && expression.Over == nil && expression.Having == nil && len(expression.OrderBy) == 0 && len(expression.WithinGroup) == 0 {
+			value, err := g.expr(expression.Args[0], 8)
+			return value + "!", err
+		}
 		if g.pretty && functionNeedsPrettyLayout(expression) && !(expression.ArrayLiteral && g.dialect == DialectBigQuery) {
 			return g.prettyFunctionCall(expression, parentPrecedence)
 		}
 		text = generateFunctionName(expression.Name)
-		if g.pretty && g.dialect != DialectClickHouse && len(expression.Name) > 0 && !expression.Name[len(expression.Name)-1].Quoted && !(g.dialect == DialectBigQuery && len(expression.Name) == 1 && isLowercaseFunctionName(expression.Name[0].Text)) {
+		if g.pretty && g.dialect != DialectHANA && g.dialect != DialectClickHouse && len(expression.Name) > 0 && !expression.Name[len(expression.Name)-1].Quoted && !(g.dialect == DialectBigQuery && len(expression.Name) == 1 && isLowercaseFunctionName(expression.Name[0].Text)) {
 			parts := make([]Identifier, len(expression.Name))
 			copy(parts, expression.Name)
 			parts[len(parts)-1].Text = strings.ToUpper(parts[len(parts)-1].Text)

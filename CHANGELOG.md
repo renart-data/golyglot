@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.14 - 2026-09-28
+
+### Added
+
+- Register SAP HANA and Vertica across the pure-Go parser, formatter,
+  transpiler and analysis APIs, with dialect-aware identifiers and types.
+- Add native Vertica operators, type aliases and LISTAGG parameter formatting;
+  retain HANA function spelling and normalize native DDL/cast types.
+- Add scope-aware HANA DUMMY lowering to DuckDB, selected Vertica function
+  translations and explicit NULL-ordering safeguards. Unsupported native
+  conversions return errors rather than silently changing semantics.
+- Add 231 independently pinned upstream fixtures, focused regression tests
+  and opt-in DuckDB result checks. Document the initial dialect coverage and
+  native-engine verification limits.
+
 ## 0.1.0-alpha.13 - 2026-09-28
 
 ### Fixed

@@ -488,6 +488,28 @@ func (transformer targetTransformer) expr(expression Expr, target Dialect) Expr 
 			return &UnaryExpr{Operator: "NOT", Expr: &copy}
 		}
 	case *FunctionCallExpr:
+		if transformer.preserveExplicitFunctionNames && (len(expression.Name) > 1 || len(expression.Name) == 1 && expression.Name[0].Quoted) {
+			// Explicit user functions still recurse into their arguments, but
+			// must not enter the builtin alias or FILTER lowering tables.
+			for i := range expression.Name {
+				normalizeIdentifierTarget(&expression.Name[i], target)
+			}
+			for i := range expression.Args {
+				expression.Args[i] = transformExpr(expression.Args[i], target)
+			}
+			expression.Having = transformExpr(expression.Having, target)
+			expression.Filter = transformExpr(expression.Filter, target)
+			for i := range expression.OrderBy {
+				transformOrderItem(&expression.OrderBy[i], target)
+			}
+			for i := range expression.WithinGroup {
+				transformOrderItem(&expression.WithinGroup[i], target)
+			}
+			if expression.Over != nil {
+				transformWindow(expression.Over, target)
+			}
+			return expression
+		}
 		if target == DialectSnowflake && expression.RawArgs != "" {
 			expression.RawArgs = normalizeSnowflakeArrayConstruct(expression.RawArgs)
 			if len(expression.Name) == 1 && strings.EqualFold(expression.Name[0].Text, "SEARCH") {
@@ -757,7 +779,7 @@ func (transformer targetTransformer) expr(expression Expr, target Dialect) Expr 
 				literal.Raw = "'" + literal.Raw + "'"
 			}
 		}
-		if target == DialectDuckDB || target == DialectHive {
+		if target == DialectDuckDB && !transformer.preserveNumericIntervals || target == DialectHive {
 			if literal, ok := expression.Value.(*LiteralExpr); ok && literal.KindValue == LiteralNumber {
 				literal.KindValue = LiteralString
 				literal.Raw = "'" + literal.Raw + "'"
@@ -2046,6 +2068,9 @@ func rewriteTSQLConvertToMySQL(function *FunctionCallExpr) Expr {
 }
 
 func rewriteFunction(function *FunctionCallExpr, target Dialect) Expr {
+	if target == DialectHANA {
+		return nil
+	}
 	if len(function.Name) != 1 || function.RawArgs != "" {
 		return nil
 	}
@@ -2110,7 +2135,7 @@ func rewriteFunction(function *FunctionCallExpr, target Dialect) Expr {
 			return &FunctionCallExpr{Name: []Identifier{{Text: conditionalFunctionName(target)}}, Args: []Expr{condition, &LiteralExpr{KindValue: LiteralNumber, Raw: "0"}, &BinaryExpr{Left: numerator, Operator: "/", Right: denominator}}}
 		}
 	}
-	if name == "ZEROIFNULL" && len(function.Args) == 1 {
+	if name == "ZEROIFNULL" && len(function.Args) == 1 && target != DialectVertica {
 		value := function.Args[0]
 		return &FunctionCallExpr{Name: []Identifier{{Text: conditionalFunctionName(target)}}, Args: []Expr{
 			&IsExpr{Value: value, Operator: "IS", Right: &LiteralExpr{KindValue: LiteralNull, Raw: "NULL"}},
@@ -3914,7 +3939,7 @@ func canonicalizeFunctionName(function *FunctionCallExpr, target Dialect) {
 	// ClickHouse function names are conventionally mixed-case (for example
 	// arrayJoin, toDateTime, and quantileState). Preserve the spelling parsed
 	// from the source unless a target rewrite explicitly changed it.
-	if target == DialectClickHouse {
+	if target == DialectClickHouse || target == DialectHANA {
 		return
 	}
 	if target == DialectBigQuery && len(function.Name[0].Text) == 1 {
@@ -4846,6 +4871,9 @@ func rewriteCastType(expression *CastExpr, target Dialect) {
 	if !ok {
 		return
 	}
+	if (target == DialectHANA || target == DialectVertica) && name.Quoted {
+		return
+	}
 	arrayType := strings.TrimSpace(name.Text)
 	for strings.HasSuffix(arrayType, "[]") {
 		arrayDepth++
@@ -4876,6 +4904,15 @@ func rewriteCastType(expression *CastExpr, target Dialect) {
 	upper := strings.ToUpper(name.Text)
 	mapped := name.Text
 	switch target {
+	case DialectHANA, DialectVertica:
+		mapped = hanaVerticaTypeName(upper, target)
+		if target == DialectVertica && hasIdentifierSuffix(expression.TypeSuffix, "PRECISION") && mapped == "DOUBLE PRECISION" {
+			expression.TypeSuffix = nil
+		}
+		if target == DialectVertica && (upper == "TIMESTAMP" || upper == "TIME") && hasIdentifierSuffix(expression.TypeSuffix, "WITH") && hasIdentifierSuffix(expression.TypeSuffix, "ZONE") {
+			mapped = upper + "TZ"
+			expression.TypeSuffix = nil
+		}
 	case DialectGeneric:
 		switch upper {
 		case "BOOLEAN", "BOOL", "INT", "BIGINT", "SMALLINT", "TINYINT",
