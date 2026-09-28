@@ -323,6 +323,9 @@ func runFullDialectFixtures(t *testing.T, path, fileDialect string) fullFixtureS
 					t.Log("presto write duckdb:76: checking NULL-preserving correction to pinned expectation")
 				}
 			}
+			if fileDialect == "bigquery" && targetName == "duckdb" {
+				want = correctedBigQueryDuckDBFixture(t, test.SQL, want)
+			}
 			target, targetVersion, err := fullParseDialect(targetName)
 			if err != nil {
 				transpilationStats.record(fmt.Sprintf("%s write %s:%d", fileDialect, targetName, index), test.SQL, want, "", err)
@@ -332,13 +335,17 @@ func runFullDialectFixtures(t *testing.T, path, fileDialect string) fullFixtureS
 			transpilationStats.record(fmt.Sprintf("%s write %s:%d", fileDialect, targetName, index), test.SQL, want, got, err)
 		}
 		for sourceName, sourceSQL := range test.Read {
+			want := test.SQL
+			if fileDialect == "duckdb" && sourceName == "bigquery" {
+				want = correctedBigQueryDuckDBFixture(t, sourceSQL, want)
+			}
 			source, _, err := fullParseDialect(sourceName)
 			if err != nil {
 				transpilationStats.record(fmt.Sprintf("%s read %s:%d", fileDialect, sourceName, index), sourceSQL, test.SQL, "", err)
 				continue
 			}
-			got, err := fullTranspile(sourceSQL, source, dialect, test.SQL)
-			transpilationStats.record(fmt.Sprintf("%s read %s:%d", fileDialect, sourceName, index), sourceSQL, test.SQL, got, err)
+			got, err := fullTranspile(sourceSQL, source, dialect, want)
+			transpilationStats.record(fmt.Sprintf("%s read %s:%d", fileDialect, sourceName, index), sourceSQL, want, got, err)
 		}
 	}
 	stats.merge(transpilationStats)

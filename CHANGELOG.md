@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.0-alpha.13 - 2026-09-28
+
+### Fixed
+
+- Preserve BigQuery `NUMERIC`/`DECIMAL` precision and scale when transpiling to DuckDB, including the `(38, 9)` default and typed `SAFE_CAST` handling.
+- Preserve BigQuery `DATE` timezone semantics across DuckDB session timezones, including nested expressions and the implicit UTC timezone of timestamp literals.
+- Render variable, parameterized, and nested `INTERVAL` amounts as SQL expressions instead of quoting them as strings in DuckDB date/time arithmetic and date arrays.
+- Add regression coverage with 108 opt-in DuckDB executions across three session timezones, plus explicit corrections to the affected pinned compatibility expectations without changing the upstream fixture snapshot.
+
 ## 0.1.0-alpha.12 - 2026-09-22
 
 ### Fixed

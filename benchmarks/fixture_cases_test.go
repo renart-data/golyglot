@@ -109,6 +109,16 @@ func loadFixtureBenchmarkCases(requestedManifestPath string) ([]fixtureBenchmark
 		if err != nil {
 			return nil, fmt.Errorf("parse target dialect for %q: %w", reference.Name, err)
 		}
+		// This pinned case predates the BigQuery implicit-UTC correction.
+		// Keep the vendored snapshot unchanged and assert the corrected SQL,
+		// just as internal/compatibility does for this exact source/target pair.
+		if source == golyglot.DialectBigQuery && target == golyglot.DialectDuckDB && testCase.SQL == "WITH sample AS (SELECT * FROM UNNEST([TIMESTAMP '2024-03-15 14:35:46', TIMESTAMP '2024-03-16 01:12:03']) AS ts) SELECT ts, TIMESTAMP_TRUNC(ts, MINUTE) AS truncated_ts FROM sample" {
+			const pinned = "WITH sample AS (SELECT * FROM UNNEST([CAST('2024-03-15 14:35:46' AS TIMESTAMPTZ), CAST('2024-03-16 01:12:03' AS TIMESTAMPTZ)]) AS _t0(ts)) SELECT ts, DATE_TRUNC('MINUTE', ts) AS truncated_ts FROM sample"
+			if expected != pinned {
+				return nil, fmt.Errorf("upstream expectation changed; review the implicit-UTC correction for %q", reference.Name)
+			}
+			expected = "WITH sample AS (SELECT * FROM UNNEST([CAST('2024-03-15 14:35:46 UTC' AS TIMESTAMPTZ), CAST('2024-03-16 01:12:03 UTC' AS TIMESTAMPTZ)]) AS _t0(ts)) SELECT ts, DATE_TRUNC('MINUTE', ts) AS truncated_ts FROM sample"
+		}
 		cases = append(cases, fixtureBenchmarkCase{
 			Name:     reference.Name,
 			Feature:  reference.Feature,
