@@ -1750,11 +1750,9 @@ func normalizeBigQuerySourceNode(root Node, target Dialect) Node {
 			if value.Value == nil {
 				switch name {
 				case "DATE":
-					switch len(value.Parameters) {
-					case 1:
-						return &RawExpr{Raw: "CAST(" + bigQueryDuckDBExprText(value.Parameters[0]) + " AS DATE)"}
-					case 2:
-						return &RawExpr{Raw: "CAST(CAST(" + bigQueryDuckDBExprText(value.Parameters[0]) + " AS TIMESTAMP) AT TIME ZONE 'UTC' AT TIME ZONE " + bigQueryDuckDBExprText(value.Parameters[1]) + " AS DATE)"}
+					if len(value.Parameters) == 1 || len(value.Parameters) == 2 {
+						// Keep arguments traversable until the function pass below.
+						return &FunctionCallExpr{nodeBase: value.nodeBase, Name: value.TypeName, Args: value.Parameters}
 					}
 				case "TIME":
 					switch len(value.Parameters) {
@@ -1779,7 +1777,7 @@ func normalizeBigQuerySourceNode(root Node, target Dialect) Node {
 				case "TIMESTAMP":
 					switch len(value.Parameters) {
 					case 1:
-						return &RawExpr{Raw: "CAST(" + bigQueryDuckDBExprText(value.Parameters[0]) + " AS TIMESTAMPTZ)"}
+						return bigQueryDuckDBTimestamp(value.Parameters[0])
 					case 2:
 						return &RawExpr{Raw: "CAST(" + bigQueryDuckDBExprText(value.Parameters[0]) + " AS TIMESTAMP) AT TIME ZONE " + bigQueryDuckDBExprText(value.Parameters[1])}
 					}
@@ -1789,7 +1787,7 @@ func normalizeBigQuerySourceNode(root Node, target Dialect) Node {
 			text := bigQueryDuckDBExprText(value.Value)
 			switch name {
 			case "TIMESTAMP":
-				return rawCast(text, "TIMESTAMPTZ")
+				return bigQueryDuckDBTimestamp(value.Value)
 			case "DATETIME":
 				return rawCast(text, "TIMESTAMP")
 			case "TIME":
@@ -1798,14 +1796,20 @@ func normalizeBigQuerySourceNode(root Node, target Dialect) Node {
 				return &RawExpr{Raw: "JSON(" + text + ")"}
 			}
 		case *CastExpr:
-			if typeName, ok := castTypeIdentifier(value.Type); ok && strings.EqualFold(typeName.Text, "NUMERIC") {
-				// BigQuery's unconstrained NUMERIC maps to DuckDB's unconstrained
-				// DECIMAL.  The generic DuckDB rule supplies a default precision
-				// for an unparameterized type, which is not the SQLGlot spelling.
-				value.Type = &RawExpr{Raw: "DECIMAL"}
-				value.TypeSuffix = nil
+			if typeName, ok := castTypeIdentifier(value.Type); ok && (strings.EqualFold(typeName.Text, "NUMERIC") || strings.EqualFold(typeName.Text, "DECIMAL")) {
+				// BigQuery's default is (38, 9), not DuckDB's (18, 3).
+				// Preserve explicitly supplied precision and scale, including
+				// the implicit zero scale of NUMERIC(p).
+				typeName.Text = "DECIMAL"
+				if call, ok := value.Type.(*CallExpr); !ok || len(call.Args) == 0 {
+					value.Type = &RawExpr{Raw: "DECIMAL(38, 9)"}
+				}
 			}
-			if !strings.EqualFold(value.Keyword, "SAFE_CAST") || len(value.TypeSuffix) == 0 {
+			if !strings.EqualFold(value.Keyword, "SAFE_CAST") {
+				return current
+			}
+			value.Keyword = "TRY_CAST"
+			if len(value.TypeSuffix) == 0 {
 				return current
 			}
 			typeName, ok := castTypeIdentifier(value.Type)
@@ -1897,11 +1901,8 @@ func normalizeBigQuerySourceNode(root Node, target Dialect) Node {
 				return &RawExpr{Raw: "CAST(CURRENT_TIMESTAMP AT TIME ZONE " + rendered(0) + " AS DATE)"}
 			}
 		case "DATE":
-			if len(function.Args) == 1 {
-				return &RawExpr{Raw: "CAST(" + rendered(0) + " AS DATE)"}
-			}
-			if len(function.Args) == 2 {
-				return &RawExpr{Raw: "CAST(CAST(" + rendered(0) + " AS TIMESTAMP) AT TIME ZONE 'UTC' AT TIME ZONE " + rendered(1) + " AS DATE)"}
+			if len(function.Args) == 1 || len(function.Args) == 2 {
+				return bigQueryDuckDBDate(function.Args)
 			}
 		case "CURRENT_TIMESTAMP", "CURRENT_TIME":
 			if len(function.Args) == 0 {
@@ -1910,7 +1911,7 @@ func normalizeBigQuerySourceNode(root Node, target Dialect) Node {
 		case "TIMESTAMP":
 			switch len(function.Args) {
 			case 1:
-				return &RawExpr{Raw: bigQueryDuckDBCast(function.Args[0], "TIMESTAMPTZ")}
+				return bigQueryDuckDBTimestamp(function.Args[0])
 			case 2:
 				return &RawExpr{Raw: bigQueryDuckDBCast(function.Args[0], "TIMESTAMP") + " AT TIME ZONE " + rendered(1)}
 			}
@@ -2293,7 +2294,7 @@ func bigQueryDuckDBExprText(expression Expr) string {
 			if name == "DATETIME" {
 				typeName = "TIMESTAMP"
 			} else if name == "TIMESTAMP" {
-				typeName = "TIMESTAMPTZ"
+				return renderExpr(bigQueryDuckDBTimestamp(typed.Value))
 			}
 			return "CAST(" + renderExpr(typed.Value) + " AS " + typeName + ")"
 		}
@@ -6370,11 +6371,7 @@ func genericDateArrayDate(expression Expr) string {
 }
 
 func bigQueryDuckDBInterval(expression Expr) string {
-	interval, ok := expression.(*IntervalExpr)
-	if !ok || len(interval.Qualifiers) == 0 {
-		return renderExpr(expression)
-	}
-	return "INTERVAL '" + strings.Trim(renderExpr(interval.Value), "'") + "' " + strings.Trim(renderExpr(interval.Qualifiers[0]), "'")
+	return renderDialectExpr(transformExpr(expression, DialectDuckDB), DialectDuckDB)
 }
 
 func genericDateArrayStep(column, amount, unit string, target Dialect) string {
@@ -8143,8 +8140,11 @@ func rewriteGenericDateFunction(function *FunctionCallExpr, target Dialect) Expr
 			case "TIME_ADD":
 				value = bigQueryDuckDBCast(args[0], "TIME")
 			}
+			if intervalArgument {
+				return &RawExpr{Raw: value + " + " + bigQueryDuckDBInterval(args[1])}
+			}
 		}
-		if (target == DialectDuckDB || target == DialectBigQuery) && intervalArgument {
+		if target == DialectBigQuery && intervalArgument {
 			amount = "'" + strings.Trim(amount, "'") + "'"
 		}
 		if name == "TIMESTAMP_ADD" || name == "DATETIME_ADD" {
@@ -8178,8 +8178,11 @@ func rewriteGenericDateFunction(function *FunctionCallExpr, target Dialect) Expr
 			case "TIME_SUB":
 				value = bigQueryDuckDBCast(args[0], "TIME")
 			}
+			if intervalArgument {
+				return &RawExpr{Raw: value + " - " + bigQueryDuckDBInterval(args[1])}
+			}
 		}
-		if (target == DialectDuckDB || target == DialectBigQuery) && intervalArgument {
+		if target == DialectBigQuery && intervalArgument {
 			amount = "'" + strings.Trim(amount, "'") + "'"
 		}
 		negative := amount + " * -1"
@@ -8200,9 +8203,6 @@ func rewriteGenericDateFunction(function *FunctionCallExpr, target Dialect) Expr
 		}
 		switch target {
 		case DialectDuckDB:
-			if intervalArgument {
-				return &RawExpr{Raw: value + " - INTERVAL '" + strings.Trim(amount, "'") + "' " + unit}
-			}
 			return &RawExpr{Raw: value + " + INTERVAL (" + negative + ") " + unit}
 		case DialectBigQuery:
 			if _, ok := args[1].(*IntervalExpr); ok {

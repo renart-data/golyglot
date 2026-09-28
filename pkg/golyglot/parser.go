@@ -4210,8 +4210,12 @@ func (p *parser) parsePrefix() Expr {
 			_, end := p.captureBalancedFunctionArguments()
 			return &RawExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: end}}, Raw: p.text[tok.Span.Start:end]}
 		}
-		if len(parts) == 1 && (strings.EqualFold(parts[0].Text, "CAST") || strings.EqualFold(parts[0].Text, "TRY_CAST")) && p.matchText("(") {
-			return p.parseCast(tok, parts[0].Text)
+		if len(parts) == 1 {
+			isCast := strings.EqualFold(parts[0].Text, "CAST") || strings.EqualFold(parts[0].Text, "TRY_CAST")
+			isSafeCast := p.options.Dialect == DialectBigQuery && strings.EqualFold(parts[0].Text, "SAFE_CAST")
+			if (isCast || isSafeCast) && p.matchText("(") {
+				return p.parseCast(tok, parts[0].Text)
+			}
 		}
 		if len(parts) == 1 && strings.EqualFold(parts[0].Text, "EXTRACT") && p.options.Dialect != DialectClickHouse && p.matchText("(") {
 			field := p.parseRequiredExpr("inside EXTRACT")
@@ -4660,7 +4664,7 @@ func isStructuredCastType(parts []Identifier) bool {
 
 func (p *parser) intervalValueStart() bool {
 	tok := p.peek()
-	return tok.Kind == TokenString || tok.Kind == TokenUnterminatedString || tok.Kind == TokenNumber || tok.Text == "(" || tok.Text == "+" || tok.Text == "-" || (p.isNameToken(tok) && !p.isStructuralKeyword(tok) && !tok.IsWord("AS") && !isWindowFrameWord(tok))
+	return tok.Kind == TokenString || tok.Kind == TokenUnterminatedString || tok.Kind == TokenNumber || tok.Kind == TokenParameter || tok.Text == "(" || tok.Text == "+" || tok.Text == "-" || (p.isNameToken(tok) && !p.isStructuralKeyword(tok) && !tok.IsWord("AS") && !isWindowFrameWord(tok))
 }
 
 func isWindowFrameWord(tok Token) bool {

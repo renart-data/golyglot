@@ -829,7 +829,7 @@ func (transformer targetTransformer) expr(expression Expr, target Dialect) Expr 
 		if (target == DialectMySQL || target == DialectStarRocks) && originalTypeName == "TIMESTAMPTZ" {
 			return &FunctionCallExpr{nodeBase: nodeBase{span: expression.SourceSpan()}, Name: []Identifier{{Text: "TIMESTAMP"}}, Args: []Expr{expression.Value}}
 		}
-		if target == DialectBigQuery && len(expression.TypeSuffix) > 0 && (originalTypeName == "DATE" || originalTypeName == "TIMESTAMP" || originalTypeName == "TIME") {
+		if target == DialectBigQuery && !strings.EqualFold(expression.Keyword, "SAFE_CAST") && len(expression.TypeSuffix) > 0 && (originalTypeName == "DATE" || originalTypeName == "TIMESTAMP" || originalTypeName == "TIME") {
 			for index, suffix := range expression.TypeSuffix {
 				text := strings.TrimSpace(suffix.Text)
 				if !strings.HasPrefix(strings.ToUpper(text), "FORMAT ") {

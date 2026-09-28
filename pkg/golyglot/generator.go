@@ -3286,6 +3286,25 @@ func (g generator) expr(expression Expr, parentPrecedence int) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if g.dialect == DialectDuckDB {
+			// DuckDB accepts bare literals but requires parentheses around
+			// variable/expression interval amounts. Never quote SQL as data.
+			switch amount := expression.Value.(type) {
+			case *LiteralExpr:
+				if amount.KindValue == LiteralParameter {
+					value = "(" + value + ")"
+				}
+			case *ParenthesizedExpr:
+			case *UnaryExpr:
+				if _, ok := numericLiteral(amount); ok {
+					value = "'" + value + "'"
+				} else {
+					value = "(" + value + ")"
+				}
+			default:
+				value = "(" + value + ")"
+			}
+		}
 		if g.dialect == DialectGeneric {
 			if literal, ok := expression.Value.(*LiteralExpr); ok {
 				value, expression.Qualifiers = normalizeIntervalLiteral(literal, expression.Qualifiers)
