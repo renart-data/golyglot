@@ -1666,6 +1666,9 @@ func normalizeCreateTableColumn(column string, target Dialect) string {
 		return strings.TrimSpace(column)
 	}
 	name = normalizeCreateColumnName(name, target)
+	if target == DialectHANA || target == DialectVertica {
+		typeToken, constraints = hanaVerticaDDLType(typeToken, constraints, target)
+	}
 	typeToken = normalizeCreateTypeToken(typeToken, target)
 	constraints = strings.TrimSpace(constraints)
 	if target == DialectSnowflake && (strings.Contains(strings.ToUpper(constraints), "IDENTITY") || strings.Contains(strings.ToUpper(constraints), "AUTOINCREMENT")) {
@@ -1890,6 +1893,12 @@ func normalizeCreateColumnName(name string, target Dialect) string {
 
 func normalizeCreateTypeToken(typeToken string, target Dialect) string {
 	typeToken = strings.TrimSpace(typeToken)
+	if target == DialectHANA || target == DialectVertica {
+		if open := strings.IndexByte(typeToken, '('); open >= 0 {
+			return hanaVerticaTypeName(typeToken[:open], target) + typeToken[open:]
+		}
+		return hanaVerticaTypeName(typeToken, target)
+	}
 	if target == DialectTSQL && strings.HasPrefix(typeToken, "\"") && strings.HasSuffix(typeToken, "\"") {
 		return "[" + strings.ReplaceAll(typeToken[1:len(typeToken)-1], "\"\"", "\"") + "]"
 	}

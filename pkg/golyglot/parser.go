@@ -1201,7 +1201,7 @@ func (p *parser) matchSetOperator() (string, bool) {
 			return operator, true
 		}
 	}
-	if (p.options.Dialect == DialectExasol || p.options.Dialect == DialectRedshift || p.options.Dialect == DialectTeradata || p.options.Dialect == DialectSpark || p.options.Dialect == DialectDatabricks || p.options.Dialect == DialectSnowflake || p.options.Dialect == DialectOracle) && p.matchWord("MINUS") {
+	if (p.options.Dialect == DialectVertica || p.options.Dialect == DialectExasol || p.options.Dialect == DialectRedshift || p.options.Dialect == DialectTeradata || p.options.Dialect == DialectSpark || p.options.Dialect == DialectDatabricks || p.options.Dialect == DialectSnowflake || p.options.Dialect == DialectOracle) && p.matchWord("MINUS") {
 		return "EXCEPT", true
 	}
 	return "", false
@@ -3215,6 +3215,11 @@ func (p *parser) parseLikeEscape(expression *BinaryExpr) {
 
 func (p *parser) parsePostfix(left Expr) Expr {
 	for {
+		if p.options.Dialect == DialectVertica && p.matchText("!") {
+			left = &FunctionCallExpr{nodeBase: nodeBase{span: Span{Start: left.SourceSpan().Start, End: p.lastEnd}}, Name: []Identifier{{Text: "FACTORIAL"}}, Args: []Expr{left}}
+			p.recordNode()
+			continue
+		}
 		if (p.options.Dialect == DialectOracle || p.options.Dialect == DialectRedshift) && p.peek().Text == "(" && p.pos+2 < len(p.tokens) && p.tokens[p.pos+1].Text == "+" && p.tokens[p.pos+2].Text == ")" {
 			start := left.SourceSpan().Start
 			p.advance()
@@ -3914,6 +3919,16 @@ func (p *parser) parseIs(left Expr) Expr {
 
 func (p *parser) parsePrefix() Expr {
 	tok := p.peek()
+	if p.options.Dialect == DialectVertica && (tok.Text == "!!" || tok.Text == "@") {
+		p.advance()
+		p.recordNode()
+		argument := p.parseExpression(7)
+		name := "FACTORIAL"
+		if tok.Text == "@" {
+			name = "ABS"
+		}
+		return &FunctionCallExpr{nodeBase: nodeBase{span: Span{Start: tok.Span.Start, End: argument.SourceSpan().End}}, Name: []Identifier{{Text: name}}, Args: []Expr{argument}}
+	}
 	if tok.IsWord("CASE") && !p.peekTextAfter(".") {
 		return p.parseCase()
 	}
@@ -4504,9 +4519,11 @@ func (p *parser) parseCastType() (Expr, []Identifier) {
 		p.advance()
 		parts[0].Text = "CHARACTER VARYING"
 	}
-	if p.options.Dialect == DialectExasol && len(parts) == 1 && strings.EqualFold(parts[0].Text, "LONG") && p.peek().IsWord("VARCHAR") {
-		p.advance()
-		parts[0].Text = "LONG VARCHAR"
+	if (p.options.Dialect == DialectExasol || p.options.Dialect == DialectVertica) && len(parts) == 1 && strings.EqualFold(parts[0].Text, "LONG") && (p.peek().IsWord("VARCHAR") || p.options.Dialect == DialectVertica && p.peek().IsWord("VARBINARY")) {
+		parts[0].Text = "LONG " + strings.ToUpper(p.advance().Text)
+	}
+	if p.options.Dialect == DialectVertica && len(parts) == 1 && strings.EqualFold(parts[0].Text, "BINARY") && p.matchWord("VARYING") {
+		parts[0].Text = "VARBINARY"
 	}
 	var typeExpr Expr = &IdentifierExpr{nodeBase: nodeBase{span: Span{Start: start, End: p.lastEnd}}, Parts: parts}
 	if p.options.Dialect == DialectMaterialize && p.peek().Text == "[" {
@@ -4566,6 +4583,11 @@ func (p *parser) parseCastType() (Expr, []Identifier) {
 			identifier, ok := p.parseIdentifier(true)
 			if !ok {
 				break
+			}
+			if p.options.Dialect == DialectVertica && p.matchText("(") {
+				raw, end := p.captureBalancedFunctionArguments()
+				identifier.Text += raw
+				identifier.Span.End = end
 			}
 			suffix = append(suffix, identifier)
 		}
@@ -5539,7 +5561,7 @@ func (p *parser) isDialectClauseBoundary(tok Token) bool {
 	switch p.options.Dialect {
 	case DialectHive:
 		return tok.word == tokenWordDistribute || tok.word == tokenWordSort
-	case DialectExasol, DialectRedshift, DialectTeradata, DialectSpark, DialectDatabricks, DialectSnowflake:
+	case DialectExasol, DialectRedshift, DialectTeradata, DialectSpark, DialectDatabricks, DialectSnowflake, DialectVertica:
 		return tok.word == tokenWordMinus
 	case DialectOracle:
 		return tok.word == tokenWordMinus || tok.word == tokenWordBulk || tok.word == tokenWordKeep

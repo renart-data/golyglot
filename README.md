@@ -36,7 +36,7 @@ prefix. Both are produced by the same parser used for strict parsing.
 
 Supported features:
 
-- 30+ named SQL dialects and pairwise transpilation
+- 36 named SQL dialects, including SAP HANA and Vertica, with dialect-specific transpilation
 - Typed AST parsing and SQL generation
 - Pretty-printing and canonical formatting
 - Fluent builders for expressions, queries, joins, CTEs, set operations, and common DML
@@ -49,7 +49,8 @@ Supported features:
 Alpha release. Run `make release-check`; use `make fixtures` to refresh the
 checked-in Polyglot/SQLGlot and custom DataFusion test snapshots. The quick
 compatibility gate is `make test-polyglot`, while `make test-polyglot-full`
-checks all 14,091 cases. Reproducible Go/Polyglot comparisons and custom
+checks all 14,322 cases, including 231 independently pinned HANA/Vertica cases.
+Reproducible Go/Polyglot comparisons and custom
 workloads are documented in [benchmarks/README.md](benchmarks/README.md). The
 Astro/Starlight docs and Monaco/WASM demo live under `docs/`; use
 `make docs-build`.
@@ -60,3 +61,9 @@ harness explicitly corrects two old NULL-dropping Presto expectations;
 the original fixture snapshot remains unchanged. See the
 [transpilation guide](docs/src/content/docs/guides/transpilation.md) for
 supported semantics and limitations.
+
+SAP HANA and Vertica support includes native formatting, type aliases and
+selected cross-dialect rewrites. Unsupported vendor-specific conversions
+return errors; registration does not imply complete vendor SQL support. See
+the [dialect reference](docs/src/content/docs/reference/dialects.md) for the
+tested surface, conservative boundaries, and execution checks.

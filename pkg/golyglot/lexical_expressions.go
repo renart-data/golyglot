@@ -3,13 +3,13 @@ package golyglot
 import "strings"
 
 func identifierKey(name Identifier, dialect Dialect) string {
-	if dialect == DialectDuckDB || dialect == DialectSQLite || dialect == DialectTSQL {
+	if dialect == DialectDuckDB || dialect == DialectSQLite || dialect == DialectTSQL || dialect == DialectVertica {
 		return strings.ToLower(name.Text)
 	}
 	if name.Quoted {
 		return name.Text
 	}
-	if dialect == DialectSnowflake || dialect == DialectOracle {
+	if dialect == DialectSnowflake || dialect == DialectOracle || dialect == DialectHANA {
 		return strings.ToUpper(name.Text)
 	}
 	return strings.ToLower(name.Text)
@@ -106,6 +106,10 @@ func walkLexicalColumns(root Node, dialect Dialect, visit func(ColumnReference))
 		case *FunctionCallExpr:
 			lambdas := make(map[Node]bool)
 			for i, argument := range value.Args {
+				if isVerticaDateUnitArgument(value, i, dialect) {
+					lambdas[argument] = true
+					continue
+				}
 				if !lambdaArgument(value, i) {
 					continue
 				}
@@ -131,6 +135,9 @@ func walkLexicalColumns(root Node, dialect Dialect, visit func(ColumnReference))
 			return
 		case *IdentifierExpr:
 			if len(value.Parts) == 0 || value.Parts[len(value.Parts)-1].Text == "*" || locals[identifierKey(value.Parts[0], dialect)] {
+				return
+			}
+			if len(value.Parts) == 1 && hanaVerticaClockType(value.Parts[0], dialect, true) != DataTypeUnknown {
 				return
 			}
 			reference := ColumnReference{Column: value.Parts[len(value.Parts)-1].Text, Span: value.SourceSpan()}

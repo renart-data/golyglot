@@ -46,6 +46,10 @@ func TranspileWithOptions(sql string, fromDialect, toDialect Dialect, options Tr
 	}
 	transformer := newTargetTransformer(fromDialect, toDialect)
 	for i := range result.Statements {
+		result.Statements[i].Node, err = prepareHANAVertica(result.Statements[i].Node, fromDialect, toDialect)
+		if err != nil {
+			return nil, err
+		}
 		if fromDialect == DialectGeneric || (fromDialect == DialectBigQuery && toDialect != DialectBigQuery) {
 			if fromDialect == DialectBigQuery {
 				result.Statements[i].Node = normalizeBigQuerySourceNode(result.Statements[i].Node, toDialect)
@@ -513,6 +517,12 @@ func normalizeGenericCommentsWithDialect(sql string, span Span, generated string
 		if token.Kind != TokenComment {
 			continue
 		}
+		// HANA's flat block comments end at the first */. Do not re-emit
+		// the apparent nested opener as a portable, nested SQL comment.
+		// The lossless parser still retains the original comment token.
+		if dialect == DialectHANA && strings.Count(token.Text, "/*") > 1 {
+			continue
+		}
 		previous := Token{}
 		for j := i - 1; j >= 0; j-- {
 			if tokens[j].Kind != TokenComment {
@@ -765,12 +775,16 @@ func FormatOne(sql string, dialect Dialect) (string, error) {
 type targetTransformer struct {
 	target                           Dialect
 	rewritePostgreSQLSourceFunctions bool
+	preserveNumericIntervals         bool
+	preserveExplicitFunctionNames    bool
 }
 
 func newTargetTransformer(source, target Dialect) targetTransformer {
 	return targetTransformer{
 		target:                           target,
 		rewritePostgreSQLSourceFunctions: source == DialectPostgreSQL && target == DialectMySQL,
+		preserveNumericIntervals:         source == DialectVertica && target == DialectDuckDB,
+		preserveExplicitFunctionNames:    source == DialectHANA || source == DialectVertica || target == DialectHANA || target == DialectVertica,
 	}
 }
 

@@ -166,13 +166,15 @@ func (t DataType) String() string { return t.SQL() }
 // It intentionally normalizes aliases while retaining modifiers and nested
 // structure, making the result suitable for schema comparison and inference.
 func ParseDataType(sql string, dialect Dialect) (DataType, error) {
-	if _, err := dialect.normalized(); err != nil {
+	dialect, err := dialect.normalized()
+	if err != nil {
 		return DataType{}, err
 	}
 	parser, err := newDataTypeParser(sql)
 	if err != nil {
 		return DataType{}, err
 	}
+	parser.dialect = dialect
 	result, err := parser.parseType()
 	if err != nil {
 		return DataType{}, err
@@ -199,8 +201,9 @@ type dataTypeToken struct {
 }
 
 type dataTypeParser struct {
-	tokens []dataTypeToken
-	index  int
+	tokens  []dataTypeToken
+	index   int
+	dialect Dialect
 }
 
 func newDataTypeParser(sql string) (*dataTypeParser, error) {
@@ -303,9 +306,30 @@ func (p *dataTypeParser) parseType() (DataType, error) {
 		return DataType{}, err
 	}
 	upper := strings.ToUpper(strings.Join(strings.Fields(name), " "))
+	if p.dialect == DialectVertica {
+		upper = hanaVerticaTypeName(upper, p.dialect)
+		if upper == "LONG VARBINARY" {
+			upper = "VARBINARY"
+		}
+	} else if p.dialect == DialectHANA {
+		switch upper {
+		case "SECONDDATE":
+			upper = "TIMESTAMP"
+		case "ALPHANUM", "NCLOB":
+			upper = "VARCHAR"
+		}
+	}
 	result := dataTypeForName(upper)
+	if p.dialect == DialectHANA && strings.EqualFold(name, "SECONDDATE") {
+		precision := 0
+		result.Precision = &precision
+	}
 
-	if p.match("<") {
+	if p.dialect == DialectVertica && result.Kind == DataTypeArray && p.match("[") {
+		if err := p.parseNestedTypeArguments(&result, "]"); err != nil {
+			return DataType{}, err
+		}
+	} else if p.match("<") {
 		if err := p.parseNestedTypeArguments(&result, ">"); err != nil {
 			return DataType{}, err
 		}
@@ -409,6 +433,13 @@ func (p *dataTypeParser) parseTypeName() (string, error) {
 	case "LONG":
 		if p.match("VARCHAR") {
 			return "LONG VARCHAR", nil
+		}
+		if p.dialect == DialectVertica && p.match("VARBINARY") {
+			return "LONG VARBINARY", nil
+		}
+	case "BINARY":
+		if p.dialect == DialectVertica && p.match("VARYING") {
+			return "VARBINARY", nil
 		}
 	}
 	return first, nil
