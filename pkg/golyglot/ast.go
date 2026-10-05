@@ -97,23 +97,30 @@ type SelectStmt struct {
 	SelectModifier   string
 	Top              Expr
 	TopParenthesized bool
-	Projections      []SelectItem
-	Into             []Identifier
-	IntoTemporary    bool
-	IntoUnlogged     bool
-	From             []TableExpr
-	Where            Expr
-	GroupBy          []Expr
-	GroupByDistinct  bool
-	Having           Expr
-	Qualify          Expr
-	ConnectBy        Expr
-	Windows          []NamedWindow
-	SortBy           []OrderItem
-	OrderBy          []OrderItem
-	Limit            Expr
-	Offset           Expr
-	Fetch            *FetchClause
+	// TOP modifiers are separate from the count expression so visitors,
+	// builders and cross-dialect generation do not lose their semantics.
+	TopPercent      bool
+	TopWithTies     bool
+	Projections     []SelectItem
+	Into            []Identifier
+	IntoTemporary   bool
+	IntoUnlogged    bool
+	From            []TableExpr
+	Where           Expr
+	GroupBy         []Expr
+	GroupByDistinct bool
+	Having          Expr
+	Qualify         Expr
+	ConnectBy       Expr
+	Windows         []NamedWindow
+	SortBy          []OrderItem
+	OrderBy         []OrderItem
+	Limit           Expr
+	// LimitPercent distinguishes DuckDB LIMIT n PERCENT (or n%) from a
+	// row-count limit. The count remains a regular, source-backed expression.
+	LimitPercent bool
+	Offset       Expr
+	Fetch        *FetchClause
 	// ValuesRows represents a VALUES query before dialect-specific lowering.
 	// Keeping it on SelectStmt lets VALUES participate in CTEs and set
 	// operations without introducing a second query root type.

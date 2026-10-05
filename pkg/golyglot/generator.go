@@ -269,6 +269,11 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 	if stmt.RawQuery != "" {
 		return canonicalRawSQL(stmt.RawQuery), nil
 	}
+	var err error
+	stmt, err = prepareSelectRowLimits(stmt, g.dialect)
+	if err != nil {
+		return "", err
+	}
 	if g.dialect == DialectSnowflake && snowflakeSemanticViewNeedsPretty(stmt) {
 		copyStmt := *stmt
 		copyStmt.From = append([]TableExpr(nil), stmt.From...)
@@ -295,17 +300,8 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 		}
 		return text + "\n" + strings.TrimSpace(stmt.Tail), nil
 	}
-	if g.pretty {
-		return g.prettySelectStmt(stmt)
-	}
 	if len(stmt.ValuesRows) > 0 {
 		return g.valuesStmt(stmt)
-	}
-	if stmt.Top != nil && g.dialect != DialectTSQL && g.dialect != DialectTeradata && g.dialect != DialectSnowflake && stmt.Limit == nil {
-		base := *stmt
-		base.Limit = stmt.Top
-		base.Top = nil
-		return g.selectStmt(&base)
 	}
 	if stmt.TailOutsideParen && stmt.Parenthesized {
 		base := *stmt
@@ -314,6 +310,7 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 		base.TailOutsideParen = false
 		base.OrderBy = nil
 		base.Limit = nil
+		base.LimitPercent = false
 		base.Offset = nil
 		base.Fetch = nil
 		base.Tail = ""
@@ -326,8 +323,11 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 	}
 	if stmt.SetOperator != "" && hasQueryTail(stmt) {
 		base := *stmt
+		base.Parenthesized = false
+		base.ParenthesisDepth = 0
 		base.OrderBy = nil
 		base.Limit = nil
+		base.LimitPercent = false
 		base.Offset = nil
 		base.Fetch = nil
 		base.Tail = ""
@@ -335,25 +335,23 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return g.appendQueryTail(text, stmt)
+		text, err = g.appendQueryTail(text, stmt)
+		return parenthesizeQuery(text, stmt), err
+	}
+	if g.pretty {
+		return g.prettySelectStmt(stmt)
 	}
 	if stmt.SetLeft != nil {
-		left, err := g.selectStmt(stmt.SetLeft)
+		left, err := g.setOperand(stmt.SetLeft, stmt.SetLeftParen)
 		if err != nil {
 			return "", err
-		}
-		if stmt.SetLeftParen && !stmt.SetLeft.Parenthesized {
-			left = "(" + left + ")"
 		}
 		if stmt.SetRight == nil {
 			return "", fmt.Errorf("cannot generate set operation without right query")
 		}
-		right, err := g.selectStmt(stmt.SetRight)
+		right, err := g.setOperand(stmt.SetRight, stmt.SetRightParen)
 		if err != nil {
 			return "", err
-		}
-		if stmt.SetRightParen && !stmt.SetRight.Parenthesized {
-			right = "(" + right + ")"
 		}
 		text := left + " " + stmt.SetOperator
 		if stmt.SetAll {
@@ -363,6 +361,11 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 			text += " " + stmt.SetModifier
 		}
 		text += " " + right
+		with, err := g.withPrefix(stmt)
+		if err != nil {
+			return "", err
+		}
+		text = with + text
 		text, err = g.appendQueryTail(text, stmt)
 		if err != nil {
 			return "", err
@@ -384,52 +387,11 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 		return prefix + generateIdentifiers(stmt.Into) + " AS " + inner, nil
 	}
 	var b strings.Builder
-	if len(stmt.With) > 0 {
-		b.WriteString("WITH ")
-		if stmt.With[0].Recursive {
-			b.WriteString("RECURSIVE ")
-		}
-		for i, cte := range stmt.With {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(generateIdentifier(cte.Name))
-			if len(cte.Columns) > 0 {
-				b.WriteByte('(')
-				for j, column := range cte.Columns {
-					if j > 0 {
-						b.WriteString(", ")
-					}
-					b.WriteString(generateIdentifier(column))
-				}
-				b.WriteByte(')')
-			}
-			if cte.Modifier != "" {
-				b.WriteByte(' ')
-				b.WriteString(cte.Modifier)
-			}
-			b.WriteString(" AS")
-			if cte.Materialized != "" {
-				b.WriteByte(' ')
-				b.WriteString(cte.Materialized)
-			}
-			b.WriteString(" (")
-			if cte.Query == nil {
-				return "", fmt.Errorf("cannot generate CTE %s without a query", cte.Name.Text)
-			}
-			query, err := g.selectStmt(cte.Query)
-			if err != nil {
-				return "", err
-			}
-			b.WriteString(query)
-			b.WriteByte(')')
-		}
-		if stmt.WithTail != "" {
-			b.WriteByte(' ')
-			b.WriteString(stmt.WithTail)
-		}
-		b.WriteByte(' ')
+	with, err := g.withPrefix(stmt)
+	if err != nil {
+		return "", err
 	}
+	b.WriteString(with)
 	b.WriteString("SELECT")
 	if stmt.Distinct {
 		b.WriteString(" DISTINCT")
@@ -459,6 +421,7 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 			b.WriteByte(' ')
 			b.WriteString(top)
 		}
+		writeTopModifiers(&b, stmt)
 	}
 	if len(stmt.Projections) == 0 {
 		return "", fmt.Errorf("cannot generate SELECT without projections")
@@ -657,93 +620,16 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 			}
 		}
 	}
-	if g.dialect == DialectTSQL && (stmt.Limit != nil || stmt.Offset != nil) {
-		if stmt.Offset != nil {
-			offset, err := g.expr(stmt.Offset, 0)
-			if err != nil {
-				return "", err
-			}
-			if g.pretty {
-				b.WriteString("\nOFFSET ")
-			} else {
-				b.WriteString(" OFFSET ")
-			}
-			b.WriteString(offset)
-			b.WriteString(" ROWS")
-		}
-		if stmt.Limit != nil {
-			limit, err := g.expr(stmt.Limit, 0)
-			if err != nil {
-				return "", err
-			}
-			if g.pretty {
-				b.WriteString("\nFETCH NEXT ")
-			} else {
-				b.WriteString(" FETCH NEXT ")
-			}
-			b.WriteString(limit)
-			b.WriteString(" ROWS ONLY")
-		}
-	} else if stmt.Limit != nil {
-		limit, err := g.expr(stmt.Limit, 0)
-		if err != nil {
-			return "", err
-		}
-		if g.pretty {
-			b.WriteString("\nLIMIT ")
-		} else {
-			b.WriteString(" LIMIT ")
-		}
-		b.WriteString(limit)
-	}
-	if g.dialect != DialectTSQL && stmt.Offset != nil {
-		offset, err := g.expr(stmt.Offset, 0)
-		if err != nil {
-			return "", err
-		}
-		if g.pretty {
-			b.WriteString("\nOFFSET ")
-		} else {
-			b.WriteString(" OFFSET ")
-		}
-		b.WriteString(offset)
-		if g.dialect == DialectOracle {
-			b.WriteString(" ROWS")
-		}
-	}
-	if stmt.Fetch != nil {
-		if g.pretty {
-			b.WriteString("\nFETCH ")
-		} else {
-			b.WriteString(" FETCH ")
-		}
-		if stmt.Fetch.Next {
-			b.WriteString("NEXT")
-		} else {
-			b.WriteString("FIRST")
-		}
-		if stmt.Fetch.Count != nil {
-			b.WriteByte(' ')
-			count, err := g.expr(stmt.Fetch.Count, 0)
-			if err != nil {
-				return "", err
-			}
-			b.WriteString(count)
-		}
-		if stmt.Fetch.Percent {
-			b.WriteString(" PERCENT")
-		}
-		b.WriteString(" ROWS")
-		if stmt.Fetch.WithTies {
-			b.WriteString(" WITH TIES")
-		} else {
-			b.WriteString(" ONLY")
-		}
+	if err := g.writeRowLimit(&b, stmt); err != nil {
+		return "", err
 	}
 	if stmt.SetOperator != "" {
 		leftText := b.String()
 		if stmt.SetLeftParen {
 			leftText = "(" + leftText + ")"
+			if g.dialect == DialectSQLite {
+				leftText = "SELECT * FROM " + leftText
+			}
 		}
 		b.Reset()
 		b.WriteString(leftText)
@@ -759,14 +645,9 @@ func (g generator) selectStmt(stmt *SelectStmt) (string, error) {
 		if stmt.SetRight == nil {
 			return "", fmt.Errorf("cannot generate set operation without right query")
 		}
-		rightGenerator := g
-		rightGenerator.indent++
-		right, err := rightGenerator.selectStmt(stmt.SetRight)
+		right, err := g.setOperand(stmt.SetRight, stmt.SetRightParen)
 		if err != nil {
 			return "", err
-		}
-		if stmt.SetRightParen && !stmt.SetRight.Parenthesized {
-			right = "(" + right + ")"
 		}
 		b.WriteByte(' ')
 		b.WriteString(right)
@@ -839,21 +720,42 @@ func (g generator) prettySelectStmt(stmt *SelectStmt) (string, error) {
 	}
 	prefix := indentString(g.indent)
 	if stmt.SetLeft != nil {
-		leftGenerator := g
-		leftGenerator.indent++
-		left, err := leftGenerator.selectStmt(stmt.SetLeft)
+		left, err := g.setOperand(stmt.SetLeft, stmt.SetLeftParen)
 		if err != nil {
 			return "", err
 		}
-		if stmt.SetLeftParen {
-			left = prefix + "(\n" + left + "\n" + prefix + ")"
-		}
-		right, err := g.selectStmt(stmt.SetRight)
+		right, err := g.setOperand(stmt.SetRight, stmt.SetRightParen)
 		if err != nil {
 			return "", err
 		}
-		if stmt.SetRightParen {
-			right = prefix + "(\n" + indentLines(right, 1) + "\n" + prefix + ")"
+		text := left + "\n" + prefix + stmt.SetOperator
+		if stmt.SetAll {
+			text += " ALL"
+		}
+		if stmt.SetModifier != "" {
+			text += " " + stmt.SetModifier
+		}
+		text += "\n" + right
+		with, err := g.withPrefix(stmt)
+		if err != nil {
+			return "", err
+		}
+		return parenthesizeQuery(with+text, stmt), nil
+	}
+	if stmt.SetOperator != "" {
+		leftStmt := *stmt
+		leftStmt.SetOperator = ""
+		leftStmt.SetRight = nil
+		leftStmt.SetLeft = nil
+		leftStmt.Parenthesized = false
+		leftStmt.ParenthesisDepth = 0
+		left, err := g.setOperand(&leftStmt, stmt.SetLeftParen)
+		if err != nil {
+			return "", err
+		}
+		right, err := g.setOperand(stmt.SetRight, stmt.SetRightParen)
+		if err != nil {
+			return "", err
 		}
 		text := left + "\n" + prefix + stmt.SetOperator
 		if stmt.SetAll {
@@ -864,41 +766,6 @@ func (g generator) prettySelectStmt(stmt *SelectStmt) (string, error) {
 		}
 		text += "\n" + right
 		return parenthesizeQuery(text, stmt), nil
-	}
-	if stmt.SetOperator != "" {
-		leftStmt := *stmt
-		leftStmt.SetOperator = ""
-		leftStmt.SetRight = nil
-		leftStmt.SetLeft = nil
-		leftStmt.Parenthesized = false
-		leftStmt.ParenthesisDepth = 0
-		leftGenerator := g
-		if stmt.SetLeftParen {
-			leftGenerator.indent++
-		}
-		left, err := leftGenerator.selectStmt(&leftStmt)
-		if err != nil {
-			return "", err
-		}
-		if stmt.SetLeftParen {
-			left = prefix + "(\n" + left + "\n" + prefix + ")"
-		}
-		rightStmt := *stmt.SetRight
-		rightStmt.Parenthesized = false
-		rightStmt.ParenthesisDepth = 0
-		right, err := g.selectStmt(&rightStmt)
-		if err != nil {
-			return "", err
-		}
-		if stmt.SetRightParen {
-			right = prefix + "(\n" + indentLines(right, 1) + "\n" + prefix + ")"
-		}
-		text := left + "\n" + prefix + stmt.SetOperator
-		if stmt.SetAll {
-			text += " ALL"
-		}
-		text += "\n" + right
-		return text, nil
 	}
 
 	var b strings.Builder
@@ -982,6 +849,7 @@ func (g generator) prettySelectStmt(stmt *SelectStmt) (string, error) {
 		if stmt.TopParenthesized {
 			b.WriteByte(')')
 		}
+		writeTopModifiers(&b, stmt)
 	}
 	if len(stmt.Projections) == 0 {
 		return "", fmt.Errorf("cannot generate SELECT without projections")
@@ -1072,25 +940,8 @@ func (g generator) prettySelectStmt(stmt *SelectStmt) (string, error) {
 			return "", err
 		}
 	}
-	if stmt.Limit != nil {
-		b.WriteByte('\n')
-		b.WriteString(prefix)
-		b.WriteString("LIMIT ")
-		text, err := g.expr(stmt.Limit, 0)
-		if err != nil {
-			return "", err
-		}
-		b.WriteString(text)
-	}
-	if stmt.Offset != nil {
-		b.WriteByte('\n')
-		b.WriteString(prefix)
-		b.WriteString("OFFSET ")
-		text, err := g.expr(stmt.Offset, 0)
-		if err != nil {
-			return "", err
-		}
-		b.WriteString(text)
+	if err := g.writeRowLimit(&b, stmt); err != nil {
+		return "", err
 	}
 	if stmt.Tail != "" {
 		b.WriteByte('\n')
@@ -2235,87 +2086,37 @@ func (g generator) appendQueryTail(text string, stmt *SelectStmt) (string, error
 	var b strings.Builder
 	b.WriteString(text)
 	if len(stmt.OrderBy) > 0 {
-		b.WriteString(" ORDER BY ")
-		for i, item := range stmt.OrderBy {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			itemText, err := g.expr(item.Expr, 0)
-			if err != nil {
+		if g.pretty {
+			b.WriteString("\n" + indentString(g.indent) + "ORDER BY\n")
+			if err := g.prettyOrderList(&b, stmt.OrderBy, g.indent+1); err != nil {
 				return "", err
 			}
-			b.WriteString(itemText)
-			if item.Descending {
-				b.WriteString(" DESC")
-			} else if item.Ascending {
-				b.WriteString(" ASC")
-			}
-			if item.NullsLast {
-				b.WriteString(" NULLS LAST")
-			} else if item.NullsFirst {
-				b.WriteString(" NULLS FIRST")
-			}
-		}
-	}
-	if g.dialect == DialectTSQL && (stmt.Limit != nil || stmt.Offset != nil) {
-		if stmt.Offset != nil {
-			offset, err := g.expr(stmt.Offset, 0)
-			if err != nil {
-				return "", err
-			}
-			b.WriteString(" OFFSET ")
-			b.WriteString(offset)
-			b.WriteString(" ROWS")
-		}
-		if stmt.Limit != nil {
-			limit, err := g.expr(stmt.Limit, 0)
-			if err != nil {
-				return "", err
-			}
-			b.WriteString(" FETCH NEXT ")
-			b.WriteString(limit)
-			b.WriteString(" ROWS ONLY")
-		}
-	} else if stmt.Limit != nil {
-		limit, err := g.expr(stmt.Limit, 0)
-		if err != nil {
-			return "", err
-		}
-		b.WriteString(" LIMIT ")
-		b.WriteString(limit)
-	}
-	if g.dialect != DialectTSQL && stmt.Offset != nil {
-		offset, err := g.expr(stmt.Offset, 0)
-		if err != nil {
-			return "", err
-		}
-		b.WriteString(" OFFSET ")
-		b.WriteString(offset)
-	}
-	if stmt.Fetch != nil {
-		b.WriteString(" FETCH ")
-		if stmt.Fetch.Next {
-			b.WriteString("NEXT")
 		} else {
-			b.WriteString("FIRST")
-		}
-		if stmt.Fetch.Count != nil {
-			count, err := g.expr(stmt.Fetch.Count, 0)
-			if err != nil {
-				return "", err
+			b.WriteString(" ORDER BY ")
+			for i, item := range stmt.OrderBy {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				itemText, err := g.expr(item.Expr, 0)
+				if err != nil {
+					return "", err
+				}
+				b.WriteString(itemText)
+				if item.Descending {
+					b.WriteString(" DESC")
+				} else if item.Ascending {
+					b.WriteString(" ASC")
+				}
+				if item.NullsLast {
+					b.WriteString(" NULLS LAST")
+				} else if item.NullsFirst {
+					b.WriteString(" NULLS FIRST")
+				}
 			}
-			b.WriteByte(' ')
-			b.WriteString(count)
 		}
-		if stmt.Fetch.Percent {
-			b.WriteString(" PERCENT")
-		}
-		b.WriteString(" ROWS")
-		if stmt.Fetch.WithTies {
-			b.WriteString(" WITH TIES")
-		} else {
-			b.WriteString(" ONLY")
-		}
+	}
+	if err := g.writeRowLimit(&b, stmt); err != nil {
+		return "", err
 	}
 	if stmt.Tail != "" {
 		b.WriteByte(' ')

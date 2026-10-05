@@ -889,11 +889,15 @@ func (p *parser) parseSelect() *SelectStmt {
 			stmt.Top = p.parsePostfix(p.parsePrefix())
 		}
 	}
-	if p.options.Dialect == DialectTSQL && stmt.Top != nil && p.matchWord("PERCENT") {
+	if p.options.Dialect == DialectTSQL && stmt.Top != nil {
+		stmt.TopPercent = p.matchWord("PERCENT")
 		if p.matchWord("WITH") {
-			p.matchWord("TIES")
+			stmt.TopWithTies = p.matchWord("TIES")
+			if !stmt.TopWithTies {
+				p.reportExpectedWord("TIES", "after TOP WITH")
+			}
 		}
-		if p.peek().Kind == TokenEOF || p.peek().Text == ";" || p.peek().Text == ")" {
+		if stmt.TopPercent && (p.peek().Kind == TokenEOF || p.peek().Text == ";" || p.peek().Text == ")") {
 			stmt.RawQuery = strings.TrimSpace(p.text[start:p.lastEnd])
 			stmt.nodeBase.span = Span{Start: start, End: p.lastEnd}
 			return stmt
@@ -953,7 +957,7 @@ func (p *parser) parseSelect() *SelectStmt {
 		stmt.OrderBy = p.parseOrderList()
 	}
 	if p.peek().IsWord("LIMIT") && p.hasClauseExpression() && p.matchWord("LIMIT") {
-		stmt.Limit = p.parseLimitExpr()
+		stmt.Limit, stmt.LimitPercent = p.parseLimitExpr()
 		if p.matchText(",") {
 			offset := stmt.Limit
 			stmt.Limit = p.parseRequiredExpr("after LIMIT offset comma")
@@ -987,6 +991,7 @@ func (p *parser) parseSelect() *SelectStmt {
 		}
 		stmt.Fetch = fetch
 	}
+	p.checkRowLimitConflicts(stmt)
 	if operator, ok := p.matchQuerySetOperator(); ok {
 		stmt.SetOperator = operator
 		stmt.SetAll = p.matchWord("ALL")
@@ -1096,15 +1101,13 @@ func (p *parser) parseTrailingQueryClauses(stmt *SelectStmt) bool {
 	}
 	if p.peek().IsWord("LIMIT") && p.hasClauseExpression() && p.matchWord("LIMIT") {
 		parsed = true
-		stmt.Limit = p.parseRequiredExpr("after LIMIT")
+		stmt.Limit, stmt.LimitPercent = p.parseLimitExpr()
 	}
 	if p.peek().IsWord("OFFSET") && p.hasClauseExpression() && p.matchWord("OFFSET") {
 		parsed = true
 		stmt.Offset = p.parseRequiredExpr("after OFFSET")
-		if p.options.Dialect == DialectTSQL {
-			p.matchWord("ROW")
-			p.matchWord("ROWS")
-		}
+		p.matchWord("ROW")
+		p.matchWord("ROWS")
 	}
 	if p.matchWord("FETCH") {
 		parsed = true
@@ -1121,13 +1124,26 @@ func (p *parser) parseTrailingQueryClauses(stmt *SelectStmt) bool {
 		if p.matchWord("WITH") {
 			if p.matchWord("TIES") {
 				fetch.WithTies = true
+			} else {
+				p.reportExpectedWord("TIES", "after FETCH WITH")
 			}
 		} else {
 			p.matchWord("ONLY")
 		}
 		stmt.Fetch = fetch
 	}
+	p.checkRowLimitConflicts(stmt)
 	return parsed
+}
+
+func (p *parser) checkRowLimitConflicts(stmt *SelectStmt) {
+	if stmt.Limit != nil && stmt.Fetch != nil || (stmt.Limit != nil || stmt.Fetch != nil) && (p.peek().IsWord("LIMIT") || p.peek().IsWord("FETCH")) {
+		p.report(Diagnostic{
+			Severity: SeverityError, Code: "PARSE_CONFLICTING_ROW_LIMIT",
+			Message: "a query cannot have more than one LIMIT or FETCH clause",
+			Span:    p.peek().Span, Found: p.peek().Kind,
+		})
+	}
 }
 
 func (p *parser) parseGroupByList() []Expr {
@@ -2856,15 +2872,14 @@ func (p *parser) parseRequiredExpr(context string) Expr {
 	return p.parseExpression(0)
 }
 
-func (p *parser) parseLimitExpr() Expr {
+func (p *parser) parseLimitExpr() (Expr, bool) {
 	if p.options.Dialect == DialectDuckDB && p.peek().Kind == TokenNumber && p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].Text == "%" {
-		start := p.peek().Span.Start
-		end := p.advance().Span.End
+		token := p.advance()
 		p.advance() // percent marker
-		end = p.lastEnd
-		return &RawExpr{nodeBase: nodeBase{span: Span{Start: start, End: end}}, Raw: strings.TrimSpace(p.text[start:end-1]) + " PERCENT"}
+		return &LiteralExpr{nodeBase: nodeBase{span: token.Span}, KindValue: LiteralNumber, Raw: token.Text}, true
 	}
-	return p.parseRequiredExpr("after LIMIT")
+	count := p.parseRequiredExpr("after LIMIT")
+	return count, p.options.Dialect == DialectDuckDB && p.matchWord("PERCENT")
 }
 
 func (p *parser) parseExpression(minPrecedence int) Expr {
@@ -3828,7 +3843,7 @@ func (p *parser) parseParenthesizedSetQuery() *SelectStmt {
 		} else {
 			right = p.parseSelect()
 		}
-		if left.SetOperator != "" {
+		if left.SetOperator != "" || left.Top != nil || hasQueryTail(left) {
 			if rightParenthesized {
 				right.Parenthesized = true
 				right.ParenthesisDepth++

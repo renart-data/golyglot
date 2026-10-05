@@ -21,7 +21,7 @@ func prepareHANAVertica(root Node, source, target Dialect) (Node, error) {
 		}
 	}
 	var conversionErr error
-	orderScopes := verticaCompoundOrderScopes(root)
+	orderScopes := compoundOrderQueries(root)
 	root = Transform(root, func(node Node) Node {
 		if conversionErr != nil {
 			return node

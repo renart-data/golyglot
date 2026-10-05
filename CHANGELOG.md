@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.15 - 2026-10-05
+
+### Fixed
+
+- Keep branch-local `TOP` limits inside their UNION, INTERSECT and EXCEPT
+  operands when translating to trailing limits, including SQLite's derived-table
+  form. Keep compound-level limits outside the operands when targeting TSQL.
+- Preserve `PERCENT` and `WITH TIES` structurally through parsing, AST visitors,
+  formatting and semantic diffs. Reject unsupported target modifiers and
+  conflicting LIMIT/FETCH clauses instead of silently discarding them.
+- Use Oracle OFFSET/FETCH in direct AST and builder generation as well as
+  transpilation, including pretty-printed, nested and compound queries.
+- Expand DuckDB `ORDER BY ALL` to output ordinals for supported targets, retaining
+  direction and NULL placement. Reject unknown projection widths.
+- Translate verified signed-integer DuckDB `//` operands to PostgreSQL integer
+  division with NULL on a zero divisor. Reject untyped, floating-point, unsigned
+  and other unverified conversions; native DuckDB syntax remains available.
+
+### Tests
+
+- Add red/green regressions and opt-in DuckDB/PostgreSQL result comparisons.
+  Keep the pinned upstream fixtures unchanged; one old DuckDB-to-Hive division
+  expectation now explicitly checks for rejection of a lossy mapping.
 
 ## 0.1.0-alpha.14 - 2026-09-28
 

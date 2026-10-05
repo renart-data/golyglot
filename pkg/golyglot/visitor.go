@@ -116,6 +116,7 @@ func Transform(root Node, transform func(Node) Node) Node {
 			for i := range value.OrderBy {
 				value.OrderBy[i].Expr = transformExprChild(value.OrderBy[i].Expr, visit)
 			}
+			value.Top = transformExprChild(value.Top, visit)
 			value.Limit = transformExprChild(value.Limit, visit)
 			value.Offset = transformExprChild(value.Offset, visit)
 			if value.Fetch != nil {
@@ -339,6 +340,7 @@ func nodeChildren(node Node) []Node {
 		for i := range value.With {
 			appendSelect(value.With[i].Query)
 		}
+		appendExpr(value.Top)
 		for i := range value.Projections {
 			appendExpr(value.Projections[i].Expr)
 			for j := range value.Projections[i].Except {
