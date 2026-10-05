@@ -153,7 +153,7 @@ func verticaSourceOrder(query, scope *SelectStmt) error {
 
 // The parser keeps an unparenthesized compound ORDER BY on the final arm.
 // Resolve it against the complete set, as queryScope.bindCompoundOrder does.
-func verticaCompoundOrderScopes(root Node) map[*SelectStmt]*SelectStmt {
+func compoundOrderQueries(root Node) map[*SelectStmt]*SelectStmt {
 	result := make(map[*SelectStmt]*SelectStmt)
 	Walk(root, func(node Node) VisitAction {
 		query, ok := node.(*SelectStmt)

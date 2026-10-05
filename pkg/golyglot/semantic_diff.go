@@ -285,10 +285,13 @@ func semanticBehaviorFacts(query *SelectStmt, dialect Dialect, directives []stri
 		setQuery.With = nil
 		setQuery.WithTail = ""
 		setQuery.Top = nil
+		setQuery.TopPercent = false
+		setQuery.TopWithTies = false
 		setQuery.Into = nil
 		setQuery.SortBy = nil
 		setQuery.OrderBy = nil
 		setQuery.Limit = nil
+		setQuery.LimitPercent = false
 		setQuery.Offset = nil
 		setQuery.Fetch = nil
 		facts.Set, err = GenerateWithOptions(setQuery, GenerateOptions{Canonical: true, Dialect: dialect})
@@ -309,7 +312,10 @@ func semanticBehaviorFacts(query *SelectStmt, dialect Dialect, directives []stri
 	facts.Limit, err = semanticBehaviorQuery(dialect, func(part *SelectStmt) {
 		part.Top = query.Top
 		part.TopParenthesized = query.TopParenthesized
+		part.TopPercent = query.TopPercent
+		part.TopWithTies = query.TopWithTies
 		part.Limit = query.Limit
+		part.LimitPercent = query.LimitPercent
 		part.Offset = query.Offset
 		part.Fetch = query.Fetch
 	})

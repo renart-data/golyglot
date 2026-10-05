@@ -46,6 +46,14 @@ func TranspileWithOptions(sql string, fromDialect, toDialect Dialect, options Tr
 	}
 	transformer := newTargetTransformer(fromDialect, toDialect)
 	for i := range result.Statements {
+		if err := validateRowLimits(result.Statements[i].Node, toDialect); err != nil {
+			return nil, err
+		}
+		if fromDialect == DialectDuckDB {
+			if err := prepareDuckDBSemantics(result.Statements[i].Node, toDialect); err != nil {
+				return nil, err
+			}
+		}
 		result.Statements[i].Node, err = prepareHANAVertica(result.Statements[i].Node, fromDialect, toDialect)
 		if err != nil {
 			return nil, err
@@ -65,6 +73,12 @@ func TranspileWithOptions(sql string, fromDialect, toDialect Dialect, options Tr
 			normalizeBigQueryPrestoUnnestAliases(result.Statements[i].Node)
 		}
 		transformer.node(result.Statements[i].Node)
+		if fromDialect == DialectDuckDB {
+			result.Statements[i].Node, err = lowerDuckDBDivision(result.Statements[i].Node, toDialect)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if toDialect == DialectDuckDB && (fromDialect == DialectAthena || fromDialect == DialectTrino || fromDialect == DialectPresto) {
 			result.Statements[i].Node, err = normalizeTrinoDuckDBFunctions(result.Statements[i].Node)
 			if err != nil {
@@ -4670,10 +4684,6 @@ func normalizeGenericDialectTargetNode(root Node, source Dialect) Node {
 			if value.SetOperator != "" && strings.EqualFold(value.SetModifier, "DISTINCT") {
 				value.SetModifier = ""
 			}
-			if value.Top != nil && value.Limit == nil {
-				value.Limit = value.Top
-				value.Top = nil
-			}
 			if isIdentifierNamed(value.Limit, "ALL") {
 				value.Limit = nil
 			}
@@ -9123,32 +9133,6 @@ func (transformer targetTransformer) selectStatement(stmt *SelectStmt, target Di
 			stmt.ValuesRows[i][j] = transformExpr(stmt.ValuesRows[i][j], target)
 		}
 	}
-	if stmt.Top != nil && target != DialectTSQL && target != DialectTeradata && target != DialectSnowflake {
-		if stmt.Limit == nil {
-			stmt.Limit = transformExpr(stmt.Top, target)
-		}
-		stmt.Top = nil
-	}
-	if target == DialectTSQL && stmt.Top == nil && stmt.Limit != nil && stmt.Offset == nil {
-		stmt.Top = transformExpr(stmt.Limit, target)
-		stmt.Limit = nil
-	}
-	if target == DialectOracle && stmt.Limit != nil {
-		if stmt.Fetch == nil {
-			stmt.Fetch = &FetchClause{Count: stmt.Limit}
-		}
-		stmt.Limit = nil
-	}
-	if stmt.Fetch != nil && target != DialectGeneric && target != DialectOracle && target != DialectTSQL && target != DialectPostgreSQL && target != DialectPresto && target != DialectTrino {
-		if stmt.Limit == nil {
-			if stmt.Fetch.Count == nil {
-				stmt.Limit = &LiteralExpr{KindValue: LiteralNumber, Raw: "1"}
-			} else {
-				stmt.Limit = transformExpr(stmt.Fetch.Count, target)
-			}
-		}
-		stmt.Fetch = nil
-	}
 	if target == DialectTSQL && stmt.Offset != nil && len(stmt.OrderBy) == 0 {
 		stmt.OrderBy = []OrderItem{{Expr: &RawExpr{Raw: "(SELECT NULL)"}, NullsFirst: true}}
 	}
@@ -9268,6 +9252,7 @@ func (transformer targetTransformer) selectStatement(stmt *SelectStmt, target Di
 			}
 		}
 	}
+	stmt.Top = transformExpr(stmt.Top, target)
 	stmt.Limit = transformExpr(stmt.Limit, target)
 	stmt.Offset = transformExpr(stmt.Offset, target)
 	if stmt.Fetch != nil {
